@@ -129,6 +129,7 @@ func init() {
 	// mounts
 	startCmd.Flags().StringSliceVarP(&startCmdArgs.Flags.Mounts, "mount", "V", nil, "directories to mount, suffix ':w' for writable")
 	startCmd.Flags().StringVar(&startCmdArgs.MountType, "mount-type", defaultMountType, "volume driver for the mount (sshfs, 9p)")
+	startCmd.Flags().BoolVar(&startCmdArgs.FSNotify, "mount-inotify", false, "propagate inotify file events to the VM")
 
 	// ssh agent
 	startCmd.Flags().BoolVarP(&startCmdArgs.ForwardAgent, "ssh-agent", "s", false, "forward SSH agent to the VM")

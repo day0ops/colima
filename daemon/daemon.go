@@ -86,7 +86,7 @@ func (l processManager) Start(ctx context.Context) error {
 		return fmt.Errorf("error preparing network directory: %w", err)
 	}
 
-	args := []string{os.Args[0], "daemon", "start", config.CurrentProfile().ShortName}
+	args := []string{os.Args[0], "daemon", "start", config.CurrentProfile().ShortName, "--very-verbose"}
 	opts := optsFromCtx(ctx)
 	if opts.Vmnet {
 		args = append(args, "--vmnet")

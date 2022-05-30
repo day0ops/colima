@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -101,6 +102,46 @@ func (f *fsnotifyProcess) waitForLima(ctx context.Context) {
 	}
 }
 
+func traverseDir(watcher *fsnotify.Watcher, parent, dir string) error {
+	current := filepath.Join(parent, dir)
+	children, err := os.ReadDir(current)
+	if err != nil {
+		logrus.Error(fmt.Errorf("error retrieving dirlist for '%s': %w", current, err))
+		return nil
+	}
+
+	// add root
+	if err := watcher.Add(current); err != nil {
+		logrus.Trace(fmt.Errorf("fsnotify: error adding '%s' to watch directories: %w", current, err))
+	} else {
+		logrus.Tracef("fsnotify: added %s to watch directories", current)
+	}
+
+	// traverse children
+	for _, child := range children {
+		// only treat directories
+		if !child.IsDir() {
+			continue
+		}
+		// skip hidden files
+		if strings.HasPrefix(child.Name(), ".") {
+			logrus.Trace(fmt.Errorf("skipping hidden child directory '%s' of '%s'", child.Name(), current))
+			continue
+		}
+
+		if perm := child.Type().Perm(); perm&fs.ModeSymlink == fs.ModeSymlink {
+			logrus.Trace(fmt.Errorf("skipping symlink directory '%s' of '%s'", child.Name(), current))
+			continue
+		}
+
+		err := traverseDir(watcher, current, child.Name())
+		if err != nil {
+			return fmt.Errorf("error traversing child directory '%s' of '%s': %w", child.Name(), current, err)
+		}
+	}
+	return nil
+}
+
 func (f *fsnotifyProcess) watch(ctx context.Context) error {
 	// start watcher
 	watcher, err := fsnotify.NewWatcher()
@@ -111,19 +152,21 @@ func (f *fsnotifyProcess) watch(ctx context.Context) error {
 
 	// traverse directory and add to watch list
 	for _, dir := range f.dirs {
-		err := filepath.Walk(dir, func(path string, d fs.FileInfo, err error) error {
+		root := os.DirFS(dir)
+		err := fs.WalkDir(root, ".", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				logrus.Error(fmt.Errorf("error in walkdir for '%s': %w", path, err))
 			}
 			// skip all hidden files/folders
-			if strings.HasPrefix(d.Name(), ".") {
+			if d.Name() != "." && strings.HasPrefix(d.Name(), ".") {
 				logrus.Tracef("fsnotify: skipped hidden dir '%s'", path)
 				return filepath.SkipDir
 			}
 
 			if d.IsDir() {
 				if err := watcher.Add(path); err != nil {
-					return fmt.Errorf("fsnotify: error adding '%s' to watch directories: %w", path, err)
+					logrus.Errorf("fsnotify: error adding '%s' to watch directories: %v", path, err)
+					return nil
 				}
 				logrus.Tracef("fsnotify: added %s to watch directories", path)
 			}
@@ -132,6 +175,7 @@ func (f *fsnotifyProcess) watch(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("error in directory walk: %w", err)
 		}
+
 	}
 
 	f.Lock()
