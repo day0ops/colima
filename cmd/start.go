@@ -88,11 +88,12 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 }
 
 const (
-	defaultCPU               = 2
-	defaultMemory            = 2
-	defaultDisk              = 60
-	defaultKubernetesVersion = kubernetes.DefaultVersion
-	defaultMountType         = "sshfs"
+	defaultCPU               	= 2
+	defaultMemory            	= 2
+	defaultDisk              	= 60
+	defaultKubernetesVersion 	= kubernetes.DefaultVersion
+	defaultMountType         	= "sshfs"
+	defaultMetalLBAddressPool 	= "192.168.106.240/29"
 )
 
 var startCmdArgs struct {
@@ -141,7 +142,13 @@ func init() {
 	startCmd.Flags().BoolVar(&startCmdArgs.Flags.LegacyKubernetes, "with-kubernetes", false, "start with Kubernetes")
 	startCmd.Flags().StringVar(&startCmdArgs.Kubernetes.Version, "kubernetes-version", defaultKubernetesVersion, "must match a k3s version https://github.com/k3s-io/k3s/releases")
 	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.Ingress, "kubernetes-ingress", false, "enable Traefik ingress controller")
+	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.ServiceLB, "kubernetes-disable-servicelb", false, "disable Klipper Service Load Balancer")
+	startCmd.Flags().StringToStringVar(&startCmdArgs.Kubernetes.NodeLabels, "kubernetes-node-labels", nil, "set node labels for Kubernetes")
 	startCmd.Flag("with-kubernetes").Hidden = true
+
+	// additional services in Kubernetes
+	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.AdditionalServices.InstallMetalLB, "install-metallb", false, "install MetalLB for Kubernetes")
+	startCmd.Flags().StringVar(&startCmdArgs.Kubernetes.AdditionalServices.MetalLBAddressPool, "metallb-address-pool", defaultMetalLBAddressPool, "MetalLB address pool")
 
 	// layer
 	startCmd.Flags().BoolVarP(&startCmdArgs.Layer, "layer", "l", false, "enable Ubuntu container layer")

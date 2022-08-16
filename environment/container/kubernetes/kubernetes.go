@@ -107,10 +107,10 @@ func (c *kubernetesRuntime) Provision(ctx context.Context) error {
 		// runtime has changed, ensure the required images are in the registry
 		if currentRuntime := c.runtime(); currentRuntime != "" && currentRuntime != runtime {
 			a.Stagef("changing runtime to %s", runtime)
-			installK3sCache(c.host, c.guest, a, log, runtime, conf.Version)
+			installK3sCache(c.host, c.guest, a, log, runtime, conf)
 		}
 		// other settings may have changed e.g. ingress
-		installK3sCluster(c.host, c.guest, a, runtime, conf.Version, conf.Ingress)
+		installK3sCluster(c.host, c.guest, a, log, runtime, conf)
 	} else {
 		if c.isInstalled() {
 			a.Stagef("version changed to %s, downloading and installing", conf.Version)
@@ -121,7 +121,7 @@ func (c *kubernetesRuntime) Provision(ctx context.Context) error {
 				a.Stage("installing")
 			}
 		}
-		installK3s(c.host, c.guest, a, log, runtime, conf.Version, conf.Ingress)
+		installK3s(c.host, c.guest, a, log, runtime, conf)
 	}
 
 	// this needs to happen on each startup
@@ -148,12 +148,22 @@ func (c kubernetesRuntime) Start(ctx context.Context) error {
 		return nil
 	}
 
+	appConf, ok := ctx.Value(config.CtxKey()).(config.Config)
+	conf := appConf.Kubernetes
+	if !ok {
+		// this should be a restart/start while vm is active
+		// retrieve value in the vm
+		conf = c.config()
+	}
+
 	a.Add(func() error {
 		return c.guest.Run("sudo", "service", "k3s", "start")
 	})
 	a.Retry("", time.Second*2, 10, func(int) error {
 		return c.guest.RunQuiet("kubectl", "cluster-info")
 	})
+
+	installAdditionalServices(c.host, c.guest, a, log, conf)
 
 	if err := a.Exec(); err != nil {
 		return err

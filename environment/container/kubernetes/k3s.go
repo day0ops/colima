@@ -9,6 +9,7 @@ import (
 	"github.com/abiosoft/colima/environment"
 	"github.com/abiosoft/colima/environment/container/containerd"
 	"github.com/abiosoft/colima/environment/container/docker"
+	"github.com/abiosoft/colima/environment/container/kubernetes/services"
 	"github.com/abiosoft/colima/environment/vm/lima/limautil"
 	"github.com/abiosoft/colima/util/downloader"
 	"github.com/sirupsen/logrus"
@@ -19,23 +20,22 @@ func installK3s(host environment.HostActions,
 	a *cli.ActiveCommandChain,
 	log *logrus.Entry,
 	containerRuntime string,
-	k3sVersion string,
-	ingress bool,
+	conf config.Kubernetes,
 ) {
-	installK3sBinary(host, guest, a, k3sVersion)
-	installK3sCache(host, guest, a, log, containerRuntime, k3sVersion)
-	installK3sCluster(host, guest, a, containerRuntime, k3sVersion, ingress)
+	installK3sBinary(host, guest, a, conf)
+	installK3sCache(host, guest, a, log, containerRuntime, conf)
+	installK3sCluster(host, guest, a, log, containerRuntime, conf)
 }
 
 func installK3sBinary(
 	host environment.HostActions,
 	guest environment.GuestActions,
 	a *cli.ActiveCommandChain,
-	k3sVersion string,
+	conf config.Kubernetes,
 ) {
 	// install k3s last to ensure it is the last step
 	downloadPath := "/tmp/k3s"
-	url := "https://github.com/k3s-io/k3s/releases/download/" + k3sVersion + "/k3s"
+	url := "https://github.com/k3s-io/k3s/releases/download/" + conf.Version + "/k3s"
 	if guest.Arch().GoArch() == "arm64" {
 		url += "-arm64"
 	}
@@ -53,13 +53,13 @@ func installK3sCache(
 	a *cli.ActiveCommandChain,
 	log *logrus.Entry,
 	containerRuntime string,
-	k3sVersion string,
+	conf config.Kubernetes,
 ) {
 	imageTar := "k3s-airgap-images-" + guest.Arch().GoArch() + ".tar"
 	imageTarGz := imageTar + ".gz"
 	downloadPathTar := "/tmp/" + imageTar
 	downloadPathTarGz := "/tmp/" + imageTarGz
-	url := "https://github.com/k3s-io/k3s/releases/download/" + k3sVersion + "/" + imageTarGz
+	url := "https://github.com/k3s-io/k3s/releases/download/" + conf.Version + "/" + imageTarGz
 	a.Add(func() error {
 		return downloader.Download(host, guest, url, downloadPathTarGz)
 	})
@@ -97,20 +97,19 @@ func installK3sCache(
 			return nil
 		})
 	}
-
 }
 
 func installK3sCluster(
 	host environment.HostActions,
 	guest environment.GuestActions,
 	a *cli.ActiveCommandChain,
+	log *logrus.Entry,
 	containerRuntime string,
-	k3sVersion string,
-	ingress bool,
+	conf config.Kubernetes,
 ) {
 	// install k3s last to ensure it is the last step
 	downloadPath := "/tmp/k3s-install.sh"
-	url := "https://raw.githubusercontent.com/k3s-io/k3s/" + k3sVersion + "/install.sh"
+	url := "https://raw.githubusercontent.com/k3s-io/k3s/" + conf.Version + "/install.sh"
 	a.Add(func() error {
 		return downloader.Download(host, guest, url, downloadPath)
 	})
@@ -123,12 +122,17 @@ func installK3sCluster(
 		"--resolv-conf", "/etc/resolv.conf",
 	}
 
-	if !ingress {
+	if !conf.Ingress {
 		args = append(args, "--disable", "traefik")
+	}
+
+	if conf.ServiceLB {
+		args = append(args, "--disable", "servicelb")
 	}
 
 	// replace ip address if networking is enabled
 	ipAddress := limautil.IPAddress(config.CurrentProfile().ID)
+	log.Info("discovered ip address ", ipAddress)
 	if ipAddress == "127.0.0.1" {
 		args = append(args, "--flannel-iface", "eth0")
 	} else {
@@ -136,6 +140,12 @@ func installK3sCluster(
 		args = append(args, "--advertise-address", ipAddress)
 		args = append(args, "--flannel-iface", "col0")
 	}
+
+	for key, value := range conf.NodeLabels {
+		log = log.WithField(key, value)
+		args = append(args, "--node-label", fmt.Sprintf("%s=%s", key, value))
+	}
+	log.Info("adding node labels")
 
 	switch containerRuntime {
 	case docker.Name:
@@ -146,5 +156,16 @@ func installK3sCluster(
 	a.Add(func() error {
 		return guest.Run("sh", "-c", "INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_SKIP_ENABLE=true k3s-install.sh "+strings.Join(args, " "))
 	})
+}
 
+func installAdditionalServices(
+	host environment.HostActions,
+	guest environment.GuestActions,
+	a *cli.ActiveCommandChain,
+	log *logrus.Entry,
+	conf config.Kubernetes,
+) {
+	if conf.AdditionalServices.InstallMetalLB {
+		services.InstallMetallb(host, guest, a, conf.AdditionalServices.MetalLBAddressPool)
+	}
 }

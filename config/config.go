@@ -8,6 +8,7 @@ import (
 	"github.com/abiosoft/colima/util"
 )
 
+const defaultProfilePrefix = "colima-"
 const AppName = "colima"
 const SubprocessProfileEnvVar = "COLIMA_PROFILE"
 
@@ -33,11 +34,11 @@ func Profile(name string) ProfileInfo {
 	}
 
 	// sanitize
-	name = strings.TrimPrefix(name, "colima-")
+	name = strings.TrimPrefix(name, defaultProfilePrefix)
 
 	// if custom profile is specified,
 	// use a prefix to prevent possible name clashes
-	i.ID = "colima-" + name
+	i.ID = defaultProfilePrefix + name
 	i.DisplayName = "colima [profile=" + name + "]"
 	i.ShortName = name
 	return i
@@ -100,9 +101,18 @@ type Config struct {
 
 // Kubernetes is kubernetes configuration
 type Kubernetes struct {
-	Enabled bool   `yaml:"enabled"`
-	Version string `yaml:"version"`
-	Ingress bool   `yaml:"ingress"`
+	Enabled 			bool   				`yaml:"enabled"`
+	Version 			string 				`yaml:"version"`
+	Ingress  			bool   				`yaml:"ingress"`
+	ServiceLB 			bool 				`yaml:"servicelb"`
+	NodeLabels 			map[string]string 	`yaml:"nodeLabels,omitempty"`
+	AdditionalServices 	AdditionalServices 	`yaml:"additionalServices,omitempty"`
+}
+
+// Additional services to install
+type AdditionalServices struct {
+	InstallMetalLB		bool 	`yaml:"metallb"`
+	MetalLBAddressPool	string	`yaml:"metallbAddressPool,omitempty"`
 }
 
 // Network is VM network configuration
