@@ -101,24 +101,25 @@ type Config struct {
 
 // Kubernetes is kubernetes configuration
 type Kubernetes struct {
-	Enabled 			bool   				`yaml:"enabled"`
-	Version 			string 				`yaml:"version"`
-	Ingress  			bool   				`yaml:"ingress"`
-	ServiceLB 			bool 				`yaml:"servicelb"`
-	NodeLabels 			map[string]string 	`yaml:"nodeLabels,omitempty"`
-	AdditionalServices 	AdditionalServices 	`yaml:"additionalServices,omitempty"`
+	Enabled            bool               `yaml:"enabled"`
+	Version            string             `yaml:"version"`
+	Ingress            bool               `yaml:"ingress"`
+	ServiceLB          bool               `yaml:"servicelb"`
+	NodeLabels         map[string]string  `yaml:"nodeLabels,omitempty"`
+	AdditionalServices AdditionalServices `yaml:"additionalServices,omitempty"`
 }
 
 // Additional services to install
 type AdditionalServices struct {
-	InstallMetalLB		bool 	`yaml:"metallb"`
-	MetalLBAddressPool	string	`yaml:"metallbAddressPool,omitempty"`
+	InstallMetalLB     bool   `yaml:"metallb"`
+	MetalLBAddressPool string `yaml:"metallbAddressPool,omitempty"`
 }
 
 // Network is VM network configuration
 type Network struct {
 	Address bool     `yaml:"address"`
 	DNS     []net.IP `yaml:"dns"`
+	Driver  string   `yaml:"driver"`
 }
 
 // Mount is volume mount

@@ -1,23 +1,23 @@
 package services
 
 import (
-	_ "embed"
 	"bytes"
+	_ "embed"
 	"fmt"
 	"text/template"
 	"time"
 
 	"github.com/abiosoft/colima/cli"
-	"github.com/abiosoft/colima/util/downloader"
 	"github.com/abiosoft/colima/embedded"
 	"github.com/abiosoft/colima/environment"
+	"github.com/abiosoft/colima/util/downloader"
 )
 
 const metallbVersion = "v0.13.4"
 
 func InstallMetallb(
-	host environment.HostActions, 
-	guest environment.GuestActions, 
+	host environment.HostActions,
+	guest environment.GuestActions,
 	a *cli.ActiveCommandChain,
 	cidrBlock string,
 ) {

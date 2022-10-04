@@ -11,6 +11,7 @@ import (
 	"github.com/abiosoft/colima/cmd/root"
 	"github.com/abiosoft/colima/config"
 	"github.com/abiosoft/colima/config/configmanager"
+	"github.com/abiosoft/colima/daemon/process/gvproxy"
 	"github.com/abiosoft/colima/embedded"
 	"github.com/abiosoft/colima/environment"
 	"github.com/abiosoft/colima/environment/container/docker"
@@ -88,12 +89,13 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 }
 
 const (
-	defaultCPU               	= 2
-	defaultMemory            	= 2
-	defaultDisk              	= 60
-	defaultKubernetesVersion 	= kubernetes.DefaultVersion
-	defaultMountType         	= "sshfs"
-	defaultMetalLBAddressPool 	= "192.168.106.240/29"
+	defaultCPU                = 2
+	defaultMemory             = 2
+	defaultDisk               = 60
+	defaultKubernetesVersion  = kubernetes.DefaultVersion
+	defaultMountType          = "sshfs"
+	defaultNetworkDriver      = gvproxy.Name
+	defaultMetalLBAddressPool = "192.168.106.240/29"
 )
 
 var startCmdArgs struct {
@@ -110,6 +112,7 @@ var startCmdArgs struct {
 
 func init() {
 	runtimes := strings.Join(environment.ContainerRuntimes(), ", ")
+	networkDrivers := strings.Join([]string{"slirp", gvproxy.Name}, ", ")
 	defaultArch := string(environment.HostArch().Value())
 
 	root.Cmd().AddCommand(startCmd)
@@ -123,6 +126,7 @@ func init() {
 
 	// network
 	if util.MacOS() {
+		startCmd.Flags().StringVar(&startCmdArgs.Network.Driver, "network-driver", defaultNetworkDriver, "network driver to use ("+networkDrivers+")")
 		startCmd.Flags().BoolVar(&startCmdArgs.Network.Address, "network-address", false, "assign reachable IP address to the VM")
 	}
 
@@ -264,6 +268,9 @@ func prepareConfig(cmd *cobra.Command) {
 		}
 	}
 	if util.MacOS() {
+		if !cmd.Flag("network-driver").Changed {
+			startCmdArgs.Network.Driver = current.Network.Driver
+		}
 		if !cmd.Flag("network-address").Changed {
 			startCmdArgs.Network.Address = current.Network.Address
 		}

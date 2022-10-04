@@ -2,7 +2,6 @@ package lima
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"github.com/abiosoft/colima/daemon"
 	"github.com/abiosoft/colima/daemon/process/gvproxy"
 	"github.com/abiosoft/colima/daemon/process/vmnet"
-	"gopkg.in/yaml.v3"
 
 	"github.com/abiosoft/colima/config"
 	"github.com/abiosoft/colima/embedded"
@@ -27,15 +25,6 @@ import (
 func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	l.Arch = environment.Arch(conf.Arch).Value()
 
-	{
-		b, err := yaml.Marshal(conf)
-		if err != nil {
-			logrus.Warnln(fmt.Errorf("error persisting Colima state: %w", err))
-		} else {
-			l.Colima = base64.StdEncoding.EncodeToString(b)
-		}
-	}
-
 	if conf.CPUType != "" && conf.CPUType != "host" {
 		l.CPUType = map[environment.Arch]string{
 			l.Arch: conf.CPUType,
@@ -43,8 +32,8 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	}
 
 	l.Images = append(l.Images,
-		File{Arch: environment.AARCH64, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.4.5/alpine-lima-clm-3.16.1-aarch64.iso", Digest: "sha512:b62f5690650e5902c8d19bbe60f008cf6bb864687133c8aea0e09999d7c964a47a6162faf42ec2b444c261ade8b4e255087059a934947840be96a16010106478"},
-		File{Arch: environment.X8664, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.4.5/alpine-lima-clm-3.16.1-x86_64.iso", Digest: "sha512:5b271eac18366577eba7a45e8932fb80eaade562a092cb0dd640be1989971a35d7588447d1d94c76f770062d9928749d939e4eba9e30c3092b04958c55ec0eeb"},
+		File{Arch: environment.AARCH64, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.4.5-1/alpine-lima-clm-3.16.2-aarch64.iso", Digest: "sha512:a79cdb3de4b297ddbc944f9f5de18ea34697b122facc94c7048324267929c19c4502fee8d2495f11f77867e2629dc721feed487affc96025212b0cccd49b28d1"},
+		File{Arch: environment.X8664, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.4.5-1/alpine-lima-clm-3.16.2-x86_64.iso", Digest: "sha512:a57bf6766a3ace16dea694023f2833d88725fe4077832328edbfcc56865c0537700caa62529465e6a6e4d3386de05bc2212d3b0bb2de56d19c18dd4557ccf15c"},
 	)
 
 	if conf.CPU > 0 {
@@ -60,14 +49,21 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	l.Containerd = Containerd{System: false, User: false}
 
 	l.DNS = conf.Network.DNS
+	l.HostResolver.Enabled = len(l.DNS) == 0
+	l.HostResolver.Hosts = map[string]string{
+		"host.docker.internal": "host.lima.internal",
+	}
 	if len(l.DNS) == 0 {
-		gvProxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name())).(bool)
+		gvProxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name)).(bool)
 		if gvProxyEnabled {
 			l.DNS = append(l.DNS, net.ParseIP(gvproxy.GatewayIP))
+			l.HostResolver.Enabled = false
 		}
-		reachableIPAddress, _ := ctx.Value(daemon.CtxKey(vmnet.Name())).(bool)
+		reachableIPAddress, _ := ctx.Value(daemon.CtxKey(vmnet.Name)).(bool)
 		if reachableIPAddress {
-			l.DNS = append(l.DNS, net.ParseIP(vmnet.NetGateway))
+			if gvProxyEnabled {
+				l.DNS = append(l.DNS, net.ParseIP(vmnet.NetGateway))
+			}
 		}
 	}
 
@@ -93,7 +89,7 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 
 	// network setup
 	{
-		reachableIPAddress, _ := ctx.Value(daemon.CtxKey(vmnet.Name())).(bool)
+		reachableIPAddress, _ := ctx.Value(daemon.CtxKey(vmnet.Name)).(bool)
 
 		// network is currently limited to macOS.
 		// gvproxy is cross platform but not needed on Linux as slirp is only erratic on macOS.
@@ -137,7 +133,7 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 				values.Vmnet.Interface = vmnet.NetInterface
 			}
 
-			gvProxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name())).(bool)
+			gvProxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name)).(bool)
 			if gvProxyEnabled {
 				values.GVProxy.Enabled = true
 				values.GVProxy.MacAddress = strings.ToUpper(gvproxy.MacAddress())
@@ -334,8 +330,6 @@ type Config struct {
 	Networks     []Network         `yaml:"networks,omitempty"`
 	Provision    []Provision       `yaml:"provision,omitempty" json:"provision,omitempty"`
 	CPUType      map[Arch]string   `yaml:"cpuType,omitempty" json:"cpuType,omitempty"`
-
-	Colima string `yaml:"colimaState"`
 }
 
 type File struct {

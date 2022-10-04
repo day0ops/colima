@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abiosoft/colima/config/configmanager"
 	"github.com/abiosoft/colima/daemon"
 	"github.com/abiosoft/colima/daemon/process/gvproxy"
 	"github.com/abiosoft/colima/daemon/process/vmnet"
@@ -37,19 +38,7 @@ func New(host environment.HostActions) environment.VM {
 	envBinary := osutil.EnvColimaBinary + "=" + osutil.Executable()
 	envs = append(envs, envLimaInstance, envSubprocess, envBinary)
 
-	// use qemu wrapper for Lima by specifying wrapper binaries via env var
-	if util.MacOS() {
-		envs = append(envs, qemu.LimaDir().BinsEnvVar()...)
-	}
-
-	home, err := limautil.LimaHome()
-	if err != nil {
-		err = fmt.Errorf("error detecting Lima config directory: %w", err)
-		logrus.Warnln(err)
-		logrus.Warnln("falling back to default '$HOME/.lima'")
-		home = filepath.Join(util.HomeDir(), ".lima")
-	}
-
+	home := limautil.LimaHome()
 	// consider making this truly flexible to support other VMs
 	return &limaVM{
 		host:         host.WithEnv(envs...),
@@ -65,8 +54,8 @@ const (
 	limactl            = "limactl"
 )
 
-func (l limaVM) limaConfDir() string {
-	return filepath.Join(l.home, config.CurrentProfile().ID)
+func (l limaVM) limaConfFile() string {
+	return filepath.Join(l.home, config.CurrentProfile().ID, "lima.yaml")
 }
 
 var _ environment.VM = (*limaVM)(nil)
@@ -97,8 +86,8 @@ func (l *limaVM) startDaemon(ctx context.Context, conf config.Config) (context.C
 		return ctx, nil
 	}
 
-	ctxKeyVmnet := daemon.CtxKey(vmnet.Name())
-	ctxKeyGVProxy := daemon.CtxKey(gvproxy.Name())
+	ctxKeyVmnet := daemon.CtxKey(vmnet.Name)
+	ctxKeyGVProxy := daemon.CtxKey(gvproxy.Name)
 
 	// use a nested chain for convenience
 	a := l.Init(ctx)
@@ -108,7 +97,9 @@ func (l *limaVM) startDaemon(ctx context.Context, conf config.Config) (context.C
 
 	a.Stage("preparing network")
 	a.Add(func() error {
-		ctx = context.WithValue(ctx, ctxKeyGVProxy, true)
+		if conf.Network.Driver == gvproxy.Name {
+			ctx = context.WithValue(ctx, ctxKeyGVProxy, true)
+		}
 		if conf.Network.Address {
 			ctx = context.WithValue(ctx, ctxKeyVmnet, true)
 		}
@@ -186,8 +177,15 @@ func (l *limaVM) startDaemon(ctx context.Context, conf config.Config) (context.C
 	}
 
 	// preserve gvproxy context
-	if gvproxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name())).(bool); gvproxyEnabled {
-		l.host = l.host.WithEnv(gvproxy.SubProcessEnvVar + "=1")
+	if gvproxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name)).(bool); gvproxyEnabled {
+		var envs []string
+
+		// env var for subproxy to detect gvproxy
+		envs = append(envs, gvproxy.SubProcessEnvVar+"=1")
+		// use qemu wrapper for Lima by specifying wrapper binaries via env var
+		envs = append(envs, qemu.LimaDir().BinsEnvVar()...)
+
+		l.host = l.host.WithEnv(envs...)
 	}
 
 	return ctx, nil
@@ -222,7 +220,7 @@ func (l *limaVM) Start(ctx context.Context, conf config.Config) error {
 		return os.Remove(configFile)
 	})
 
-	l.addPostStartActions(a)
+	l.addPostStartActions(a, conf)
 
 	// adding it to command chain to execute only after successful startup.
 	a.Add(func() error {
@@ -247,14 +245,12 @@ func (l limaVM) resume(ctx context.Context, conf config.Config) error {
 		return err
 	})
 
-	configFile := filepath.Join(l.limaConfDir(), "lima.yaml")
-
 	a.Add(func() error {
 		limaConf, err := newConf(ctx, conf)
 		if err != nil {
 			return err
 		}
-		return yamlutil.WriteYAML(limaConf, configFile)
+		return yamlutil.WriteYAML(limaConf, l.limaConfFile())
 	})
 
 	a.Stage("starting")
@@ -262,7 +258,7 @@ func (l limaVM) resume(ctx context.Context, conf config.Config) error {
 		return l.host.Run(limactl, "start", config.CurrentProfile().ID)
 	})
 
-	l.addPostStartActions(a)
+	l.addPostStartActions(a, conf)
 
 	return a.Exec()
 }
@@ -425,8 +421,8 @@ func (l limaVM) Env(s string) (string, error) {
 }
 
 func (l limaVM) Created() bool {
-	stat, err := os.Stat(l.limaConfDir())
-	return err == nil && stat.IsDir()
+	stat, err := os.Stat(l.limaConfFile())
+	return err == nil && !stat.IsDir()
 }
 
 const configFile = "/etc/colima/colima.json"
@@ -506,7 +502,7 @@ func includesHost(hostsFileContent, host string, ip net.IP) bool {
 	return false
 }
 
-func (l limaVM) addPostStartActions(a *cli.ActiveCommandChain) {
+func (l limaVM) addPostStartActions(a *cli.ActiveCommandChain, conf config.Config) {
 	// host file
 	{
 		// add docker host alias
@@ -521,4 +517,12 @@ func (l limaVM) addPostStartActions(a *cli.ActiveCommandChain) {
 
 	// registry certs
 	a.Add(l.copyCerts)
+
+	// preserve state
+	a.Add(func() error {
+		if err := configmanager.SaveToFile(conf, limautil.ColimaStateFile(config.CurrentProfile().ID)); err != nil {
+			logrus.Warnln(fmt.Errorf("error persisting Colima state: %w", err))
+		}
+		return nil
+	})
 }
