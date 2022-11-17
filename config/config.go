@@ -107,6 +107,7 @@ type Kubernetes struct {
 	ServiceLB          bool               `yaml:"servicelb"`
 	NodeLabels         map[string]string  `yaml:"nodeLabels,omitempty"`
 	AdditionalServices AdditionalServices `yaml:"additionalServices,omitempty"`
+	ClusterDomain      string             `yaml:"string"`
 }
 
 // Additional services to install

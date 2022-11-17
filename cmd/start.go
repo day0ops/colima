@@ -96,6 +96,7 @@ const (
 	defaultMountType          = "sshfs"
 	defaultNetworkDriver      = gvproxy.Name
 	defaultMetalLBAddressPool = "192.168.106.240/29"
+	defaultClusterDomain      = "cluster.local"
 )
 
 var startCmdArgs struct {
@@ -148,6 +149,7 @@ func init() {
 	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.Ingress, "kubernetes-ingress", false, "enable Traefik ingress controller")
 	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.ServiceLB, "kubernetes-disable-servicelb", false, "disable Klipper Service Load Balancer")
 	startCmd.Flags().StringToStringVar(&startCmdArgs.Kubernetes.NodeLabels, "kubernetes-node-labels", nil, "set node labels for Kubernetes")
+	startCmd.Flags().StringVar(&startCmdArgs.Kubernetes.ClusterDomain, "kubernetes-cluster-domain", defaultClusterDomain, "set to cluster.local by default")
 	startCmd.Flag("with-kubernetes").Hidden = true
 
 	// additional services in Kubernetes

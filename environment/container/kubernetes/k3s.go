@@ -145,7 +145,8 @@ func installK3sCluster(
 		log = log.WithField(key, value)
 		args = append(args, "--node-label", fmt.Sprintf("%s=%s", key, value))
 	}
-	log.Info("adding node labels")
+
+	args = append(args, "--cluster-domain", conf.ClusterDomain)
 
 	switch containerRuntime {
 	case docker.Name:
