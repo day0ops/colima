@@ -13,7 +13,7 @@ import (
 	"github.com/abiosoft/colima/util/downloader"
 )
 
-const metallbVersion = "v0.13.4"
+const metallbVersion = "v0.13.7"
 
 func InstallMetallb(
 	host environment.HostActions,
