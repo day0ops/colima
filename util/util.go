@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/abiosoft/colima/cli"
+	"github.com/coreos/go-semver/semver"
 	"github.com/google/shlex"
 	"github.com/sirupsen/logrus"
 )
@@ -25,6 +28,42 @@ func HomeDir() string {
 // MacOS returns if the current OS is macOS.
 func MacOS() bool {
 	return runtime.GOOS == "darwin"
+}
+
+// MacOS13OrNewer returns if the current OS is macOS 13 or newer.
+func MacOS13OrNewerOnM1() bool {
+	return runtime.GOARCH == "arm64" && MacOS13OrNewer()
+}
+
+// MacOS13OrNewer returns if the current OS is macOS 13 or newer.
+func MacOS13OrNewer() bool {
+	if !MacOS() {
+		return false
+	}
+	ver, err := macOSProductVersion()
+	if err != nil {
+		logrus.Warnln(fmt.Errorf("error retrieving macOS version: %w", err))
+		return false
+	}
+
+	cver, err := semver.NewVersion("13.0.0")
+	if err != nil {
+		logrus.Warnln(fmt.Errorf("error parsing version: %w", err))
+		return false
+	}
+
+	return cver.Compare(*ver) <= 0
+}
+
+// RosettaRunning checks if Rosetta process is running.
+func RosettaRunning() bool {
+	if !MacOS() {
+		return false
+	}
+	cmd := cli.Command("pgrep", "oahd")
+	cmd.Stderr = nil
+	cmd.Stdout = nil
+	return cmd.Run() == nil
 }
 
 // AppendToPath appends directory to PATH.
@@ -64,7 +103,7 @@ func RandomAvailablePort() int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-// ShellSplit splids cmd into arguments using.
+// ShellSplit splits cmd into arguments using.
 func ShellSplit(cmd string) []string {
 	split, err := shlex.Split(cmd)
 	if err != nil {
@@ -95,4 +134,24 @@ func CleanPath(location string) (string, error) {
 	}
 
 	return strings.TrimSuffix(str, "/") + "/", nil
+}
+
+// macOSProductVersion returns the host's macOS version.
+func macOSProductVersion() (*semver.Version, error) {
+	cmd := exec.Command("sw_vers", "-productVersion")
+	// output is like "12.3.1\n"
+	b, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute %v: %w", cmd.Args, err)
+	}
+	verTrimmed := strings.TrimSpace(string(b))
+	// macOS 12.4 returns just "12.4\n"
+	for strings.Count(verTrimmed, ".") < 2 {
+		verTrimmed += ".0"
+	}
+	verSem, err := semver.NewVersion(verTrimmed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse macOS version %q: %w", verTrimmed, err)
+	}
+	return verSem, nil
 }

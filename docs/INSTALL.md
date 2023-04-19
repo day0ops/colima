@@ -36,13 +36,25 @@ Or using solely in a `nix-shell`
 nix-shell -p colima
 ```
 
+## Arch
+
+Install dependencies
+```
+sudo pacman -S qemu-base go docker
+```
+Install Lima and Colima from Aur
+```
+yay -S lima-bin colima-bin
+```
+
+
 ## Binary
 
 Binaries are available with every release on the [releases page](https://github.com/abiosoft/colima/releases).
 
 ```sh
 # download binary
-curl -LO https://github.com/abiosoft/colima/releases/download/v0.4.0/colima-$(uname)-$(uname -m)
+curl -LO https://github.com/abiosoft/colima/releases/download/v0.5.3/colima-$(uname)-$(uname -m)
 
 # install in $PATH
 install colima-$(uname)-$(uname -m) /usr/local/bin/colima # or sudo install if /usr/local/bin requires root.

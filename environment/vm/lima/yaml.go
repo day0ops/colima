@@ -25,6 +25,27 @@ import (
 func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	l.Arch = environment.Arch(conf.Arch).Value()
 
+	// VM type is qemu except in few scenarios
+	l.VMType = QEMU
+
+	sameArchitecture := environment.HostArch() == l.Arch
+
+	// when vz is chosen and OS version supports it
+	if util.MacOS13OrNewer() && conf.VMType == VZ && sameArchitecture {
+		l.VMType = VZ
+
+		// Rosetta is only available on M1
+		if conf.VZRosetta && util.MacOS13OrNewerOnM1() {
+			if util.RosettaRunning() {
+				l.Rosetta.Enabled = true
+				l.Rosetta.BinFmt = true
+			} else {
+				logrus.Warnln("Unable to enable Rosetta: Rosetta2 is not installed")
+				logrus.Warnln("Run 'softwareupdate --install-rosetta' to install Rosetta2")
+			}
+		}
+	}
+
 	if conf.CPUType != "" && conf.CPUType != "host" {
 		l.CPUType = map[environment.Arch]string{
 			l.Arch: conf.CPUType,
@@ -32,8 +53,8 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	}
 
 	l.Images = append(l.Images,
-		File{Arch: environment.AARCH64, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.4.5-1/alpine-lima-clm-3.16.2-aarch64.iso", Digest: "sha512:a79cdb3de4b297ddbc944f9f5de18ea34697b122facc94c7048324267929c19c4502fee8d2495f11f77867e2629dc721feed487affc96025212b0cccd49b28d1"},
-		File{Arch: environment.X8664, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.4.5-1/alpine-lima-clm-3.16.2-x86_64.iso", Digest: "sha512:a57bf6766a3ace16dea694023f2833d88725fe4077832328edbfcc56865c0537700caa62529465e6a6e4d3386de05bc2212d3b0bb2de56d19c18dd4557ccf15c"},
+		File{Arch: environment.AARCH64, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.5.0-2/alpine-lima-clm-3.16.2-aarch64.iso", Digest: "sha512:06abfa8c9fd954f8bfe4ce226bf282dd06e9dfbcd09f57566bf6c20809beb5a3367415b515e0a65d6a1638ecfd3a3bb3fb6d654dee3d72164bd0279370448507"},
+		File{Arch: environment.X8664, Location: "https://github.com/abiosoft/alpine-lima/releases/download/colima-v0.5.0-2/alpine-lima-clm-3.16.2-x86_64.iso", Digest: "sha512:e9e118498f3a0745574ffc3686105d2c9777f7142164fe50ee47909dabd504c80ac29aeb76f9582706173310d1488d3b6f0ee9018e2a6aadc28eefb7767b63ec"},
 	)
 
 	if conf.CPU > 0 {
@@ -48,10 +69,15 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	l.SSH = SSH{LocalPort: 0, LoadDotSSHPubKeys: false, ForwardAgent: conf.ForwardAgent}
 	l.Containerd = Containerd{System: false, User: false}
 
-	l.DNS = conf.Network.DNS
-	l.HostResolver.Enabled = len(l.DNS) == 0
-	l.HostResolver.Hosts = map[string]string{
-		"host.docker.internal": "host.lima.internal",
+	l.DNS = conf.Network.DNSResolvers
+	l.HostResolver.Enabled = len(conf.Network.DNSResolvers) == 0
+	l.HostResolver.Hosts = conf.Network.DNSHosts
+	if l.HostResolver.Hosts == nil {
+		l.HostResolver.Hosts = make(map[string]string)
+	}
+
+	if _, ok := l.HostResolver.Hosts["host.docker.internal"]; !ok {
+		l.HostResolver.Hosts["host.docker.internal"] = "host.lima.internal"
 	}
 	if len(l.DNS) == 0 {
 		gvProxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name)).(bool)
@@ -72,6 +98,7 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 		l.Env = make(map[string]string)
 	}
 
+	// extra required provision commands
 	{
 		// fix inotify
 		l.Provision = append(l.Provision, Provision{
@@ -85,15 +112,74 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 			Mode:   ProvisionModeUser,
 			Script: "sudo usermod -aG docker $USER",
 		})
+
+		// allow env vars propagation for services
+		l.Provision = append(l.Provision, Provision{
+			Mode:   ProvisionModeSystem,
+			Script: `grep -q "^rc_env_allow" /etc/rc.conf || echo 'rc_env_allow="*"' >> /etc/rc.conf`,
+		})
+
 	}
 
 	// network setup
 	{
-		reachableIPAddress, _ := ctx.Value(daemon.CtxKey(vmnet.Name)).(bool)
+		reachableIPAddress := true
+		if conf.Network.Address {
+			if l.VMType == VZ {
+				l.Networks = append(l.Networks, Network{
+					VZNAT:     true,
+					Interface: vmnet.NetInterface,
+				})
+			} else {
+				reachableIPAddress, _ = ctx.Value(daemon.CtxKey(vmnet.Name)).(bool)
 
-		// network is currently limited to macOS.
-		// gvproxy is cross platform but not needed on Linux as slirp is only erratic on macOS.
-		if util.MacOS() {
+				// network is currently limited to macOS.
+				if util.MacOS() && reachableIPAddress {
+					if err := func() error {
+						socketFile := vmnet.Info().Socket.File()
+						// ensure the socket file exists
+						if _, err := os.Stat(socketFile); err != nil {
+							return fmt.Errorf("vmnet socket file not found: %w", err)
+						}
+
+						l.Networks = append(l.Networks, Network{
+							Socket:    socketFile,
+							Interface: vmnet.NetInterface,
+						})
+
+						return nil
+					}(); err != nil {
+						reachableIPAddress = false
+						logrus.Warn(fmt.Errorf("error setting up reachable IP address: %w", err))
+					}
+				}
+			}
+
+			// disable ports 80 and 443 when k8s is enabled and there is a reachable IP address
+			// to prevent ingress (traefik) from occupying relevant host ports.
+			if reachableIPAddress && conf.Kubernetes.Enabled && !disableHas(conf.Kubernetes.Disable, "ingress") {
+				l.PortForwards = append(l.PortForwards,
+					PortForward{
+						GuestIP:           net.ParseIP("0.0.0.0"),
+						GuestPort:         80,
+						GuestIPMustBeZero: true,
+						Ignore:            true,
+						Proto:             TCP,
+					},
+					PortForward{
+						GuestIP:           net.ParseIP("0.0.0.0"),
+						GuestPort:         443,
+						GuestIPMustBeZero: true,
+						Ignore:            true,
+						Proto:             TCP,
+					},
+				)
+			}
+		}
+
+		// gvproxy is cross-platform but not needed on Linux as slirp is only erratic on macOS.
+		gvProxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name)).(bool)
+		if gvProxyEnabled && util.MacOS() {
 			var values struct {
 				Vmnet struct {
 					Enabled   bool
@@ -108,27 +194,6 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 			}
 
 			if reachableIPAddress {
-				if err := func() error {
-					ptpFile := vmnet.Info().PTPFile
-					// ensure the ptp file exists
-					if _, err := os.Stat(ptpFile); err != nil {
-						return fmt.Errorf("vmnet ptp socket file not found: %w", err)
-					}
-
-					l.Networks = append(l.Networks, Network{
-						VNL:        ptpFile,
-						SwitchPort: 65535, // this is fixed
-						Interface:  vmnet.NetInterface,
-					})
-
-					return nil
-				}(); err != nil {
-					reachableIPAddress = false
-					logrus.Warn(fmt.Errorf("error setting up routable IP address: %w", err))
-				}
-			}
-
-			if reachableIPAddress {
 				values.Vmnet.Enabled = true
 				values.Vmnet.Interface = vmnet.NetInterface
 			}
@@ -139,49 +204,28 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 				values.GVProxy.MacAddress = strings.ToUpper(gvproxy.MacAddress())
 				values.GVProxy.IPAddress = net.ParseIP(gvproxy.DeviceIP)
 				values.GVProxy.Gateway = net.ParseIP(gvproxy.GatewayIP)
-			}
 
-			if err := func() error {
-				tpl, err := embedded.ReadString("network/ifaces.sh")
-				if err != nil {
-					return err
+				if err := func() error {
+					tpl, err := embedded.ReadString("network/ifaces.sh")
+					if err != nil {
+						return err
+					}
+
+					script, err := util.ParseTemplate(tpl, values)
+					if err != nil {
+						return fmt.Errorf("error parsing template for network script: %w", err)
+					}
+
+					l.Provision = append(l.Provision, Provision{
+						Mode:   ProvisionModeSystem,
+						Script: string(script),
+					})
+
+					return nil
+				}(); err != nil {
+					logrus.Warn(fmt.Errorf("error setting up gvproxy network: %w", err))
 				}
-
-				script, err := util.ParseTemplate(tpl, values)
-				if err != nil {
-					return fmt.Errorf("error parsing template for network script: %w", err)
-				}
-
-				l.Provision = append(l.Provision, Provision{
-					Mode:   ProvisionModeSystem,
-					Script: string(script),
-				})
-
-				return nil
-			}(); err != nil {
-				logrus.Warn(fmt.Errorf("error setting up gvproxy network: %w", err))
 			}
-		}
-
-		// disable ports 80 and 443 when k8s is enabled and there is a reachable IP address
-		// to prevent ingress (traefik) from occupying relevant host ports.
-		if reachableIPAddress && conf.Kubernetes.Enabled && conf.Kubernetes.Ingress {
-			l.PortForwards = append(l.PortForwards,
-				PortForward{
-					GuestIP:           net.ParseIP("0.0.0.0"),
-					GuestPort:         80,
-					GuestIPMustBeZero: true,
-					Ignore:            true,
-					Proto:             TCP,
-				},
-				PortForward{
-					GuestIP:           net.ParseIP("0.0.0.0"),
-					GuestPort:         443,
-					GuestIPMustBeZero: true,
-					Ignore:            true,
-					Proto:             TCP,
-				},
-			)
 		}
 	}
 
@@ -245,13 +289,33 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 	}
 
 	switch strings.ToLower(conf.MountType) {
-	case "", "ssh", "sshfs", "reversessh", "reverse-ssh", "reversesshfs", REVSSHFS:
+	case "ssh", "sshfs", "reversessh", "reverse-ssh", "reversesshfs", REVSSHFS:
 		l.MountType = REVSSHFS
 	default:
-		l.MountType = NINEP
+		if l.VMType == VZ {
+			l.MountType = VIRTIOFS
+		} else { // qemu
+			l.MountType = NINEP
+		}
+	}
+
+	l.Provision = append(l.Provision, Provision{
+		Mode:   ProvisionModeSystem,
+		Script: "mkmntdirs && mount -a",
+	})
+
+	// trim mounted drive to recover disk space
+	l.Provision = append(l.Provision, Provision{
+		Mode:   ProvisionModeSystem,
+		Script: `readlink /sbin/fstrim || fstrim -a`,
+	})
+
+	// workaround for slow virtiofs https://github.com/drud/ddev/issues/4466#issuecomment-1361261185
+	// TODO: remove when fixed upstream
+	if l.MountType == VIRTIOFS {
 		l.Provision = append(l.Provision, Provision{
 			Mode:   ProvisionModeSystem,
-			Script: "mkmntdirs && mount -a",
+			Script: `stat /sys/class/block/vda/queue/write_cache && echo 'write through' > /sys/class/block/vda/queue/write_cache`,
 		})
 	}
 
@@ -283,11 +347,6 @@ func newConf(ctx context.Context, conf config.Config) (l Config, err error) {
 
 			mount := Mount{Location: location, MountPoint: mountPoint, Writable: m.Writable}
 
-			// use passthrough for readonly 9p mounts
-			if conf.MountType == NINEP && !m.Writable {
-				mount.NineP.SecurityModel = "passthrough"
-			}
-
 			l.Mounts = append(l.Mounts, mount)
 
 			// check if cache directory has been mounted by other mounts, and remove cache directory from mounts
@@ -313,6 +372,7 @@ type Arch = environment.Arch
 
 // Config is lima config. Code copied from lima and modified.
 type Config struct {
+	VMType       VMType            `yaml:"vmType,omitempty" json:"vmType,omitempty"`
 	Arch         Arch              `yaml:"arch,omitempty"`
 	Images       []File            `yaml:"images"`
 	CPUs         *int              `yaml:"cpus,omitempty"`
@@ -330,6 +390,7 @@ type Config struct {
 	Networks     []Network         `yaml:"networks,omitempty"`
 	Provision    []Provision       `yaml:"provision,omitempty" json:"provision,omitempty"`
 	CPUType      map[Arch]string   `yaml:"cpuType,omitempty" json:"cpuType,omitempty"`
+	Rosetta      Rosetta           `yaml:"rosetta,omitempty" json:"rosetta,omitempty"`
 }
 
 type File struct {
@@ -362,15 +423,21 @@ type Firmware struct {
 	LegacyBIOS bool `yaml:"legacyBIOS"`
 }
 
-type Proto = string
-
-type MountType = string
+type (
+	Proto     = string
+	MountType = string
+	VMType    = string
+)
 
 const (
 	TCP Proto = "tcp"
 
 	REVSSHFS MountType = "reverse-sshfs"
 	NINEP    MountType = "9p"
+	VIRTIOFS MountType = "virtiofs"
+
+	QEMU VMType = "qemu"
+	VZ   VMType = "vz"
 )
 
 type PortForward struct {
@@ -394,11 +461,20 @@ type HostResolver struct {
 }
 
 type Network struct {
-	// VNL is a Virtual Network Locator (https://github.com/rd235/vdeplug4/commit/089984200f447abb0e825eb45548b781ba1ebccd).
+	// `Lima`, `Socket`, and `VNL` are mutually exclusive; exactly one is required
+	Lima string `yaml:"lima,omitempty" json:"lima,omitempty"`
+	// Socket is a QEMU-compatible socket
+	Socket string `yaml:"socket,omitempty" json:"socket,omitempty"`
+	// VZNAT uses VZNATNetworkDeviceAttachment. Needs VZ. No root privilege is required.
+	VZNAT bool `yaml:"vzNAT,omitempty" json:"vzNAT,omitempty"`
+
+	// VNLDeprecated is a Virtual Network Locator (https://github.com/rd235/vdeplug4/commit/089984200f447abb0e825eb45548b781ba1ebccd).
 	// On macOS, only VDE2-compatible form (optionally with vde:// prefix) is supported.
-	VNL        string `yaml:"vnl,omitempty" json:"vnl,omitempty"`
-	SwitchPort uint16 `yaml:"switchPort,omitempty" json:"switchPort,omitempty"` // VDE Switch port, not TCP/UDP port (only used by VDE networking)
-	Interface  string `yaml:"interface,omitempty" json:"interface,omitempty"`
+	// VNLDeprecated is deprecated. Use Socket.
+	VNLDeprecated        string `yaml:"vnl,omitempty" json:"vnl,omitempty"`
+	SwitchPortDeprecated uint16 `yaml:"switchPort,omitempty" json:"switchPort,omitempty"` // VDE Switch port, not TCP/UDP port (only used by VDE networking)
+	MACAddress           string `yaml:"macAddress,omitempty" json:"macAddress,omitempty"`
+	Interface            string `yaml:"interface,omitempty" json:"interface,omitempty"`
 }
 
 type ProvisionMode = string
@@ -420,6 +496,11 @@ type NineP struct {
 	Cache           string `yaml:"cache,omitempty" json:"cache,omitempty"`
 }
 
+type Rosetta struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	BinFmt  bool `yaml:"binfmt" json:"binfmt"`
+}
+
 func checkOverlappingMounts(mounts []config.Mount) error {
 	for i := 0; i < len(mounts)-1; i++ {
 		for j := i + 1; j < len(mounts); j++ {
@@ -439,4 +520,14 @@ func checkOverlappingMounts(mounts []config.Mount) error {
 		}
 	}
 	return nil
+}
+
+// disableHas checks if the provided feature is indeed found in the disable configuration slice.
+func disableHas(disable []string, feature string) bool {
+	for _, f := range disable {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }

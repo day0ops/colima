@@ -8,9 +8,11 @@ import (
 	"github.com/abiosoft/colima/util"
 )
 
-const defaultProfilePrefix = "colima-"
-const AppName = "colima"
-const SubprocessProfileEnvVar = "COLIMA_PROFILE"
+const (
+	defaultProfilePrefix    = "colima-"
+	AppName                 = "colima"
+	SubprocessProfileEnvVar = "COLIMA_PROFILE"
+)
 
 var profile = ProfileInfo{ID: AppName, DisplayName: AppName, ShortName: "default"}
 
@@ -78,9 +80,14 @@ type Config struct {
 	Network      Network           `yaml:"network,omitempty"`
 	Env          map[string]string `yaml:"env,omitempty"` // environment variables
 
+	// VM
+	VMType    string `yaml:"vmType,omitempty"`
+	VZRosetta bool   `yaml:"rosetta,omitempty"`
+
 	// volume mounts
-	Mounts    []Mount `yaml:"mounts,omitempty"`
-	MountType string  `yaml:"mountType,omitempty"`
+	Mounts       []Mount `yaml:"mounts,omitempty"`
+	MountType    string  `yaml:"mountType,omitempty"`
+	MountINotify bool    `yaml:"mountInotify,omitempty"`
 
 	// Runtime is one of docker, containerd.
 	Runtime         string `yaml:"runtime,omitempty"`
@@ -97,14 +104,16 @@ type Config struct {
 
 	// provision scripts
 	Provision []Provision `yaml:"provision,omitempty"`
+
+	// SSH config generation
+	SSHConfig bool `yaml:"sshConfig,omitempty"`
 }
 
 // Kubernetes is kubernetes configuration
 type Kubernetes struct {
 	Enabled            bool               `yaml:"enabled"`
 	Version            string             `yaml:"version"`
-	Ingress            bool               `yaml:"ingress"`
-	ServiceLB          bool               `yaml:"servicelb"`
+	Disable            []string           `yaml:"disable"`
 	NodeLabels         map[string]string  `yaml:"nodeLabels,omitempty"`
 	AdditionalServices AdditionalServices `yaml:"additionalServices,omitempty"`
 	ClusterDomain      string             `yaml:"string"`
@@ -118,9 +127,10 @@ type AdditionalServices struct {
 
 // Network is VM network configuration
 type Network struct {
-	Address bool     `yaml:"address"`
-	DNS     []net.IP `yaml:"dns"`
-	Driver  string   `yaml:"driver"`
+	Address      bool              `yaml:"address"`
+	DNSResolvers []net.IP          `yaml:"dns"`
+	DNSHosts     map[string]string `yaml:"dnsHosts"`
+	Driver       string            `yaml:"driver"`
 }
 
 // Mount is volume mount
@@ -160,4 +170,11 @@ func (c Config) Empty() bool { return c.Runtime == "" } // this may be better bu
 // CtxKey returns the context key for config.
 func CtxKey() any {
 	return struct{ name string }{name: "colima_config"}
+}
+
+func (c Config) DriverLabel() string {
+	if util.MacOS13OrNewer() && c.VMType == "vz" {
+		return "macOS Virtualization.Framework"
+	}
+	return "QEMU"
 }

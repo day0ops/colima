@@ -13,16 +13,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abiosoft/colima/cli"
+	"github.com/abiosoft/colima/config"
 	"github.com/abiosoft/colima/config/configmanager"
 	"github.com/abiosoft/colima/daemon"
 	"github.com/abiosoft/colima/daemon/process/gvproxy"
+	"github.com/abiosoft/colima/daemon/process/inotify"
 	"github.com/abiosoft/colima/daemon/process/vmnet"
+	"github.com/abiosoft/colima/environment"
 	"github.com/abiosoft/colima/environment/vm/lima/limautil"
 	"github.com/abiosoft/colima/qemu"
-
-	"github.com/abiosoft/colima/cli"
-	"github.com/abiosoft/colima/config"
-	"github.com/abiosoft/colima/environment"
 	"github.com/abiosoft/colima/util"
 	"github.com/abiosoft/colima/util/osutil"
 	"github.com/abiosoft/colima/util/yamlutil"
@@ -67,6 +67,9 @@ type limaVM struct {
 	// keep config in case of restart
 	conf config.Config
 
+	// lima config
+	limaConf Config
+
 	// lima config directory
 	home string
 
@@ -81,64 +84,85 @@ func (l limaVM) Dependencies() []string {
 }
 
 func (l *limaVM) startDaemon(ctx context.Context, conf config.Config) (context.Context, error) {
-	// limited to macOS for now
-	if !util.MacOS() {
+	isQEMU := conf.VMType == QEMU
+	isVZ := conf.VMType == VZ
+
+	// limited to macOS (with Qemu driver)
+	// or vz with inotify enabled
+	if !util.MacOS() || (isVZ && !conf.MountINotify) {
 		return ctx, nil
 	}
 
 	ctxKeyVmnet := daemon.CtxKey(vmnet.Name)
+	ctxKeyInotify := daemon.CtxKey(inotify.Name)
 	ctxKeyGVProxy := daemon.CtxKey(gvproxy.Name)
 
 	// use a nested chain for convenience
 	a := l.Init(ctx)
 	log := l.Logger(ctx)
 
-	installedKey := struct{ key string }{key: "installed"}
+	networkInstalledKey := struct{ key string }{key: "network_installed"}
 
-	a.Stage("preparing network")
-	a.Add(func() error {
-		if conf.Network.Driver == gvproxy.Name {
-			ctx = context.WithValue(ctx, ctxKeyGVProxy, true)
-		}
-		if conf.Network.Address {
-			ctx = context.WithValue(ctx, ctxKeyVmnet, true)
-		}
-		deps, root := l.daemon.Dependencies(ctx)
-		if deps.Installed() {
-			ctx = context.WithValue(ctx, installedKey, true)
+	// add inotify to daemon
+	if conf.MountINotify {
+		a.Add(func() error {
+			ctx = context.WithValue(ctx, ctxKeyInotify, true)
+			deps, _ := l.daemon.Dependencies(ctx, conf)
+			if err := deps.Install(l.host); err != nil {
+				return fmt.Errorf("error setting up inotify dependencies: %w", err)
+			}
 			return nil
-		}
+		})
+	}
 
-		// if user interaction is not required (i.e. root),
-		// no need for another verbose info.
-		if root {
-			log.Println("dependencies missing for setting up reachable IP address")
-			log.Println("sudo password may be required")
-		}
+	// add network processes to daemon
+	if isQEMU {
+		a.Stage("preparing network")
+		a.Add(func() error {
+			if conf.Network.Driver == gvproxy.Name {
+				ctx = context.WithValue(ctx, ctxKeyGVProxy, true)
+			}
+			if conf.Network.Address {
+				ctx = context.WithValue(ctx, ctxKeyVmnet, true)
+			}
+			deps, root := l.daemon.Dependencies(ctx, conf)
+			if deps.Installed() {
+				ctx = context.WithValue(ctx, networkInstalledKey, true)
+				return nil
+			}
 
-		// install deps
-		err := deps.Install(l.host)
-		if err != nil {
-			ctx = context.WithValue(ctx, installedKey, false)
-		}
-		return err
-	})
+			// if user interaction is not required (i.e. root),
+			// no need for another verbose info.
+			if root {
+				log.Println("dependencies missing for setting up reachable IP address")
+				log.Println("sudo password may be required")
+			}
 
+			// install deps
+			err := deps.Install(l.host)
+			if err != nil {
+				ctx = context.WithValue(ctx, networkInstalledKey, false)
+			}
+			return err
+		})
+	}
+
+	// start daemon
 	a.Add(func() error {
-		return l.daemon.Start(ctx)
+		return l.daemon.Start(ctx, conf)
 	})
 
-	// delay to ensure that the vmnet is running
-	statusKey := struct{ key string }{key: "networkStatus"}
-	if conf.Network.Address {
-		a.Retry("", time.Second*3, 5, func(i int) error {
-			s, err := l.daemon.Running(ctx)
+	statusKey := struct{ key string }{key: "daemonStatus"}
+	// delay to ensure that the processes have started
+	if conf.Network.Address || conf.MountINotify {
+		a.Retry("", time.Second*1, 15, func(i int) error {
+			s, err := l.daemon.Running(ctx, conf)
 			ctx = context.WithValue(ctx, statusKey, s)
 			if err != nil {
 				return err
 			}
 			if !s.Running {
-				return fmt.Errorf("network process is not running")
+				return fmt.Errorf("daemon is not running")
 			}
 			for _, p := range s.Processes {
 				if !p.Running {
@@ -151,36 +175,56 @@ func (l *limaVM) startDaemon(ctx context.Context, conf config.Config) (context.C
 
 	// network failure is not fatal
 	if err := a.Exec(); err != nil {
-		func() {
-			installed, _ := ctx.Value(installedKey).(bool)
-			if !installed {
-				log.Warnln(fmt.Errorf("error setting up network dependencies: %w", err))
-				return
-			}
-
-			status, ok := ctx.Value(statusKey).(daemon.Status)
-			if !ok {
-				return
-			}
-			if !status.Running {
-				log.Warnln(fmt.Errorf("error starting network: %w", err))
-				return
-			}
-
-			for _, p := range status.Processes {
-				if !p.Running {
-					ctx = context.WithValue(ctx, daemon.CtxKey(p.Name), false)
-					log.Warnln(fmt.Errorf("error starting %s: %w", p.Name, err))
+		if isQEMU {
+			func() {
+				installed, _ := ctx.Value(networkInstalledKey).(bool)
+				if !installed {
+					log.Warnln(fmt.Errorf("error setting up network dependencies: %w", err))
+					return
 				}
-			}
-		}()
+
+				status, ok := ctx.Value(statusKey).(daemon.Status)
+				if !ok {
+					return
+				}
+				if !status.Running {
+					log.Warnln(fmt.Errorf("error starting network: %w", err))
+					return
+				}
+
+				// revert gvproxy to boolean
+				for _, p := range status.Processes {
+					// TODO: handle inotify separate from network
+					if p.Name == inotify.Name {
+						continue
+					}
+					if !p.Running {
+						ctx = context.WithValue(ctx, daemon.CtxKey(p.Name), false)
+						log.Warnln(fmt.Errorf("error starting %s: %w", p.Name, err))
+					}
+				}
+			}()
+		}
+	}
+
+	// check if inotify is running
+	if conf.MountINotify {
+		if inotifyEnabled, _ := ctx.Value(ctxKeyInotify).(bool); !inotifyEnabled {
+			log.Warnln("error occured enabling inotify daemon")
+		}
+	}
+
+	// preserve vmnet context
+	if vmnetEnabled, _ := ctx.Value(ctxKeyVmnet).(bool); vmnetEnabled {
+		// env var for subprocess to detect vmnet
+		l.host = l.host.WithEnv(vmnet.SubProcessEnvVar + "=1")
 	}
 
 	// preserve gvproxy context
-	if gvproxyEnabled, _ := ctx.Value(daemon.CtxKey(gvproxy.Name)).(bool); gvproxyEnabled {
+	if gvProxyEnabled, _ := ctx.Value(ctxKeyGVProxy).(bool); gvProxyEnabled {
 		var envs []string
 
-		// env var for subproxy to detect gvproxy
+		// env var for subprocess to detect gvproxy
 		envs = append(envs, gvproxy.SubProcessEnvVar+"=1")
 		// use qemu wrapper for Lima by specifying wrapper binaries via env var
 		envs = append(envs, qemu.LimaDir().BinsEnvVar()...)
@@ -206,12 +250,12 @@ func (l *limaVM) Start(ctx context.Context, conf config.Config) error {
 	a.Stage("creating and starting")
 	configFile := filepath.Join(os.TempDir(), config.CurrentProfile().ID+".yaml")
 
-	a.Add(func() error {
-		limaConf, err := newConf(ctx, conf)
+	a.Add(func() (err error) {
+		l.limaConf, err = newConf(ctx, conf)
 		if err != nil {
 			return err
 		}
-		return yamlutil.WriteYAML(limaConf, configFile)
+		return yamlutil.WriteYAML(l.limaConf, configFile)
 	})
 	a.Add(func() error {
 		return l.host.Run(limactl, "start", "--tty=false", configFile)
@@ -231,7 +275,7 @@ func (l *limaVM) Start(ctx context.Context, conf config.Config) error {
 	return a.Exec()
 }
 
-func (l limaVM) resume(ctx context.Context, conf config.Config) error {
+func (l *limaVM) resume(ctx context.Context, conf config.Config) error {
 	log := l.Logger(ctx)
 	a := l.Init(ctx)
 
@@ -245,12 +289,15 @@ func (l limaVM) resume(ctx context.Context, conf config.Config) error {
 		return err
 	})
 
-	a.Add(func() error {
-		limaConf, err := newConf(ctx, conf)
+	a.Add(func() (err error) {
+		// disk must be resized before starting
+		conf = l.syncDiskSize(ctx, conf)
+
+		l.limaConf, err = newConf(ctx, conf)
 		if err != nil {
 			return err
 		}
-		return yamlutil.WriteYAML(limaConf, l.limaConfFile())
+		return yamlutil.WriteYAML(l.limaConf, l.limaConfFile())
 	})
 
 	a.Stage("starting")
@@ -263,7 +310,7 @@ func (l limaVM) resume(ctx context.Context, conf config.Config) error {
 	return a.Exec()
 }
 
-func (l limaVM) Running(ctx context.Context) bool {
+func (l limaVM) Running(_ context.Context) bool {
 	i, err := limautil.Instance()
 	if err != nil {
 		logrus.Trace(fmt.Errorf("error retrieving running instance: %w", err))
@@ -275,7 +322,7 @@ func (l limaVM) Running(ctx context.Context) bool {
 func (l limaVM) Stop(ctx context.Context, force bool) error {
 	log := l.Logger(ctx)
 	a := l.Init(ctx)
-	if !l.Running(ctx) {
+	if !l.Running(ctx) && !force {
 		log.Println("not running")
 		return nil
 	}
@@ -283,8 +330,13 @@ func (l limaVM) Stop(ctx context.Context, force bool) error {
 	a.Stage("stopping")
 
 	if util.MacOS() {
+		conf, _ := limautil.InstanceConfig()
 		a.Retry("", time.Second*1, 10, func(retryCount int) error {
-			return l.daemon.Stop(ctx)
+			err := l.daemon.Stop(ctx, conf)
+			if err != nil {
+				err = cli.ErrNonFatal(err)
+			}
+			return err
 		})
 	}
 
@@ -302,8 +354,9 @@ func (l limaVM) Teardown(ctx context.Context) error {
 	a := l.Init(ctx)
 
 	if util.MacOS() {
+		conf, _ := limautil.InstanceConfig()
 		a.Retry("", time.Second*1, 10, func(retryCount int) error {
-			return l.daemon.Stop(ctx)
+			return l.daemon.Stop(ctx, conf)
 		})
 	}
 
@@ -460,7 +513,7 @@ func (l limaVM) Set(key, value string) error {
 		return fmt.Errorf("error saving settings: %w", err)
 	}
 
-	if err := l.Write(configFile, string(b)); err != nil {
+	if err := l.Write(configFile, b); err != nil {
 		return fmt.Errorf("error saving settings: %w", err)
 	}
 
@@ -492,7 +545,7 @@ func includesHost(hostsFileContent, host string, ip net.IP) bool {
 	scanner := bufio.NewScanner(strings.NewReader(hostsFileContent))
 	for scanner.Scan() {
 		str := strings.Fields(scanner.Text())
-		if str[0] != ip.String() {
+		if len(str) == 0 || str[0] != ip.String() {
 			continue
 		}
 		if len(str) > 1 && str[1] == host {
@@ -502,7 +555,54 @@ func includesHost(hostsFileContent, host string, ip net.IP) bool {
 	return false
 }
 
-func (l limaVM) addPostStartActions(a *cli.ActiveCommandChain, conf config.Config) {
+func (l *limaVM) syncDiskSize(ctx context.Context, conf config.Config) config.Config {
+	log := l.Logger(ctx)
+	instance, err := limautil.InstanceConfig()
+	if err != nil {
+		// instance config missing, ignore
+		return conf
+	}
+
+	resized := func() bool {
+		if instance.Disk == conf.Disk {
+			// nothing to do
+			return false
+		}
+
+		if conf.VMType == VZ {
+			log.Warnln("dynamic disk resize not supported for VZ driver, ignoring...")
+			return false
+		}
+
+		size := conf.Disk - instance.Disk
+		if size < 0 {
+			log.Warnln("disk size cannot be reduced, ignoring...")
+			return false
+		}
+
+		sizeStr := fmt.Sprintf("%dG", conf.Disk)
+		args := []string{"qemu-img", "resize"}
+		disk := limautil.ColimaDiffDisk(config.CurrentProfile().ID)
+		args = append(args, disk, sizeStr)
+
+		// qemu-img resize /path/to/diffdisk +10G
+		if err := l.host.RunQuiet(args...); err != nil {
+			log.Warnln(fmt.Errorf("unable to resize disk: %w", err))
+			return false
+		}
+
+		log.Printf("resizing disk to %dGiB...", conf.Disk)
+		return true
+	}()
+
+	if !resized {
+		conf.Disk = instance.Disk
+	}
+
+	return conf
+}
+
+func (l *limaVM) addPostStartActions(a *cli.ActiveCommandChain, conf config.Config) {
 	// host file
 	{
 		// add docker host alias
@@ -517,6 +617,28 @@ func (l limaVM) addPostStartActions(a *cli.ActiveCommandChain, conf config.Confi
 
 	// registry certs
 	a.Add(l.copyCerts)
+
+	// use rosetta for x86_64 emulation
+	a.Add(func() error {
+		if !l.limaConf.Rosetta.Enabled {
+			return nil
+		}
+
+		// enable rosetta
+		err := l.Run("sudo", "sh", "-c", `stat /proc/sys/fs/binfmt_misc/rosetta || echo ':rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/mnt/lima-rosetta/rosetta:OCF' > /proc/sys/fs/binfmt_misc/register`)
+		if err != nil {
+			logrus.Warn(fmt.Errorf("unable to enable rosetta: %w", err))
+			return nil
+		}
+
+		// disable qemu
+		err = l.Run("sudo", "sh", "-c", `stat /proc/sys/fs/binfmt_misc/qemu-x86_64 && echo 0 > /proc/sys/fs/binfmt_misc/qemu-x86_64`)
+		if err != nil {
+			logrus.Warn(fmt.Errorf("unable to disable qemu x86_84 emulation: %w", err))
+		}
+
+		return nil
+	})
 
 	// preserve state
 	a.Add(func() error {

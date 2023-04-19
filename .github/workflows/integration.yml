@@ -14,16 +14,23 @@ on:
       - "**/*.md"
       - "**/*.nix"
       - "**/*.lock"
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'Debug with tmate set "debug_enabled"'
+        required: false
+        default: "false"
+
 jobs:
   kubernetes-docker:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: "1.20"
 
       - name: Install CLI deps
         run: |
@@ -31,6 +38,13 @@ jobs:
 
       - name: Build and Install
         run: make && sudo make install
+
+      - name: tmate debugging session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
 
       - name: Start Colima
         run: colima start --runtime docker --kubernetes
@@ -45,14 +59,14 @@ jobs:
         run: colima delete -f
 
   kubernetes-containerd:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: "1.20"
 
       - name: Install CLI deps
         run: |
@@ -60,6 +74,13 @@ jobs:
 
       - name: Build and Install
         run: make && sudo make install
+
+      - name: tmate debugging session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
 
       - name: Start
         run: colima start --runtime containerd --kubernetes
@@ -74,14 +95,14 @@ jobs:
         run: colima delete -f
 
   docker:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: "1.20"
 
       - name: Install CLI deps
         run: |
@@ -90,32 +111,30 @@ jobs:
       - name: Build and Install
         run: make && sudo make install
 
+      - name: tmate debugging session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
+
       - name: Start Colima
-        run: colima start --runtime docker
-
-      - name: Delay
-        run: sleep 5
-
-      - name: Validate Docker
-        run: docker ps && docker info
-
-      - name: Validate DNS
-        run: colima ssh -- nslookup host.docker.internal
-
-      - name: Build Image
-        run: docker build integration
-
-      - name: Stop
-        run: colima stop
-
-      - name: Start Colima with Layer
         run: colima start --runtime docker --layer
 
       - name: Delay
         run: sleep 10
+      
+      - name: Validate Docker
+        run: docker ps && docker info
+
+      - name: Validate DNS
+        run: colima ssh --layer=false -- nslookup host.docker.internal
+
+      - name: Build Image
+        run: docker build integration
 
       - name: Validate Layer
-        run: colima ssh -- cat /etc/os-release
+        run: colima ssh --layer -- cat /etc/os-release
 
       - name: Stop
         run: colima stop
@@ -124,14 +143,14 @@ jobs:
         run: colima delete -f
 
   docker-aarch64:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: "1.20"
 
       - name: Install CLI deps
         run: |
@@ -140,11 +159,18 @@ jobs:
       - name: Build and Install
         run: make && sudo make install
 
+      - name: tmate debugging session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
+
       - name: Start Colima
-        run: colima start --runtime docker --arch aarch64
+        run: colima start --runtime docker --arch aarch64 --layer
 
       - name: Delay
-        run: sleep 5
+        run: sleep 20
 
       - name: Validate Docker
         run: docker ps && docker info
@@ -153,19 +179,10 @@ jobs:
         run: docker build integration
 
       - name: Validate DNS
-        run: colima ssh -- nslookup host.docker.internal
-
-      - name: Stop
-        run: colima stop
-
-      - name: Start Colima with Layer
-        run: colima start --runtime docker --arch aarch64 --layer
-
-      - name: Delay
-        run: sleep 10
+        run: colima ssh --layer=false -- nslookup host.docker.internal
 
       - name: Validate Layer
-        run: colima ssh -- cat /etc/os-release
+        run: colima ssh --layer -- cat /etc/os-release
 
       - name: Stop
         run: colima stop
@@ -174,14 +191,14 @@ jobs:
         run: colima delete -f
 
   containerd:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: "1.20"
 
       - name: Install CLI deps
         run: |
@@ -190,29 +207,30 @@ jobs:
       - name: Build and Install
         run: make && sudo make install
 
+      - name: tmate debugging session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
+
       - name: Start Colima
-        run: colima start --runtime containerd
-
-      - name: Delay
-        run: sleep 5
-
-      - name: Validate Containerd
-        run: colima nerdctl ps && colima nerdctl info
-
-      - name: Build Image
-        run: colima nerdctl -- build integration
-
-      - name: Stop
-        run: colima stop
-
-      - name: Start Colima with Layer
         run: colima start --runtime containerd --layer
 
       - name: Delay
         run: sleep 10
 
+      - name: Validate Containerd
+        run: colima nerdctl ps && colima nerdctl info
+
+      - name: Validate DNS
+        run: colima ssh --layer=false -- nslookup host.docker.internal
+
+      - name: Build Image
+        run: colima nerdctl -- build integration
+
       - name: Validate Layer
-        run: colima ssh -- cat /etc/os-release
+        run: colima ssh --layer -- cat /etc/os-release
 
       - name: Stop
         run: colima stop
@@ -221,14 +239,14 @@ jobs:
         run: colima delete -f
 
   containerd-aarch64:
-    runs-on: macos-11
+    runs-on: macos-12
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18
+          go-version: "1.20"
 
       - name: Install CLI deps
         run: |
@@ -237,32 +255,30 @@ jobs:
       - name: Build and Install
         run: make && sudo make install
 
-      - name: Start Colima
-        run: colima start --runtime containerd --arch aarch64
+      - name: tmate debugging session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.debug_enabled }}
 
-      - name: Delay
-        run: sleep 5
+      - name: Start Colima
+        run: colima start --runtime containerd --arch aarch64 --layer
 
       - name: Validate Containerd
         run: colima nerdctl ps && colima nerdctl info
 
       - name: Validate DNS
-        run: colima ssh -- nslookup host.docker.internal
+        run: colima ssh --layer=false -- nslookup host.docker.internal
 
       - name: Build Image
         run: colima nerdctl -- build integration
-
-      - name: Stop
-        run: colima stop
-
-      - name: Start Colima with Layer
-        run: colima start --runtime containerd --arch aarch64 --layer
 
       - name: Delay
         run: sleep 10
 
       - name: Validate Layer
-        run: colima ssh -- cat /etc/os-release
+        run: colima ssh --layer -- cat /etc/os-release
 
       - name: Stop
         run: colima stop

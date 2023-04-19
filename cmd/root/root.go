@@ -9,17 +9,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var versionInfo = config.AppVersion()
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "colima",
-	Short: "container runtimes on macOS with minimal setup",
-	Long:  `Colima provides container runtimes on macOS with minimal setup.`,
+	Use:     "colima",
+	Short:   "container runtimes on macOS with minimal setup",
+	Long:    `Colima provides container runtimes on macOS with minimal setup.`,
+	Version: versionInfo.Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 
 		switch cmd.Name() {
+
 		// special case handling for commands directly interacting with the VM
-		// start, stop, delete, status, version, ssh-config
-		case "start", "stop", "delete", "status", "version", "ssh-config":
+		// start, stop, restart, delete, status, version, ssh-config
+		case "start",
+			"stop",
+			"restart",
+			"delete",
+			"status",
+			"version",
+			"ssh-config":
+
 			// if an arg is passed, assume it to be the profile (provided --profile is unset)
 			// i.e. colima start docker == colima start --profile=docker
 			if len(args) > 0 && !cmd.Flag("profile").Changed {

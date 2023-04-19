@@ -37,7 +37,9 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 		"  colima start --runtime containerd --kubernetes\n" +
 		"  colima start --cpu 4 --memory 8 --disk 100\n" +
 		"  colima start --arch aarch64\n" +
-		"  colima start --dns 1.1.1.1 --dns 8.8.8.8",
+		"  colima start --dns 1.1.1.1 --dns 8.8.8.8\n" +
+		"  colima start --dns-host example.com=1.2.3.4\n" +
+		"  colima start --kubernetes --kubernetes-disable=coredns,servicelb,traefik,local-storage,metrics-server",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		app := newApp()
@@ -62,6 +64,11 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 			return fmt.Errorf("error opening config file: %w", err)
 		}
 
+		// validate config
+		if err := configmanager.ValidateConfig(conf); err != nil {
+			return fmt.Errorf("error in config file: %w", err)
+		}
+
 		if app.Active() {
 			if !cli.Prompt("colima is currently running, restart to apply changes") {
 				return nil
@@ -70,7 +77,7 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 				return fmt.Errorf("error stopping :%w", err)
 			}
 			// pause before startup to prevent race condition
-			time.Sleep(time.Second * 5)
+			time.Sleep(time.Second * 3)
 		}
 
 		return app.Start(conf)
@@ -78,6 +85,11 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		// combine args and current config file(if any)
 		prepareConfig(cmd)
+
+		// validate config
+		if err := configmanager.ValidateConfig(startCmdArgs.Config); err != nil {
+			return fmt.Errorf("error in config: %w", err)
+		}
 
 		// persist in preparing of application start
 		if err := configmanager.Save(startCmdArgs.Config); err != nil {
@@ -89,15 +101,22 @@ Run 'colima template' to set the default configurations or 'colima start --edit'
 }
 
 const (
-	defaultCPU                = 2
-	defaultMemory             = 2
-	defaultDisk               = 60
-	defaultKubernetesVersion  = kubernetes.DefaultVersion
-	defaultMountType          = "sshfs"
-	defaultNetworkDriver      = gvproxy.Name
+	defaultCPU               = 2
+	defaultMemory            = 2
+	defaultDisk              = 60
+	defaultKubernetesVersion = kubernetes.DefaultVersion
+
+	defaultNetworkDriver = gvproxy.Name
+
+	defaultVMType        = "qemu"
+	defaultMountTypeQEMU = "sshfs"
+	defaultMountTypeVZ   = "virtiofs"
+
 	defaultMetalLBAddressPool = "192.168.106.240/29"
 	defaultClusterDomain      = "cluster.local"
 )
+
+var defaultKubernetesDisable = []string{"traefik"}
 
 var startCmdArgs struct {
 	config.Config
@@ -108,13 +127,17 @@ var startCmdArgs struct {
 		Edit             bool
 		Editor           string
 		ActivateRuntime  bool
+		DNSHosts         []string
 	}
 }
 
 func init() {
 	runtimes := strings.Join(environment.ContainerRuntimes(), ", ")
-	networkDrivers := strings.Join([]string{"slirp", gvproxy.Name}, ", ")
-	defaultArch := string(environment.HostArch().Value())
+	networkDrivers := strings.Join([]string{gvproxy.Name, "slirp"}, ", ")
+	defaultArch := string(environment.HostArch())
+
+	mounts := strings.Join([]string{defaultMountTypeQEMU, "9p", "virtiofs"}, ", ")
+	types := strings.Join([]string{defaultVMType, "vz"}, ", ")
 
 	root.Cmd().AddCommand(startCmd)
 	startCmd.Flags().StringVarP(&startCmdArgs.Runtime, "runtime", "r", docker.Name, "container runtime ("+runtimes+")")
@@ -130,6 +153,12 @@ func init() {
 		startCmd.Flags().StringVar(&startCmdArgs.Network.Driver, "network-driver", defaultNetworkDriver, "network driver to use ("+networkDrivers+")")
 		startCmd.Flags().BoolVar(&startCmdArgs.Network.Address, "network-address", false, "assign reachable IP address to the VM")
 	}
+	if util.MacOS13OrNewer() {
+		startCmd.Flags().StringVarP(&startCmdArgs.VMType, "vm-type", "t", defaultVMType, "virtual machine type ("+types+")")
+		if util.MacOS13OrNewerOnM1() {
+			startCmd.Flags().BoolVar(&startCmdArgs.VZRosetta, "vz-rosetta", false, "enable Rosetta for amd64 emulation")
+		}
+	}
 
 	// config
 	startCmd.Flags().BoolVarP(&startCmdArgs.Flags.Edit, "edit", "e", false, "edit the configuration file before starting")
@@ -137,19 +166,23 @@ func init() {
 
 	// mounts
 	startCmd.Flags().StringSliceVarP(&startCmdArgs.Flags.Mounts, "mount", "V", nil, "directories to mount, suffix ':w' for writable")
-	startCmd.Flags().StringVar(&startCmdArgs.MountType, "mount-type", defaultMountType, "volume driver for the mount (sshfs, 9p)")
+	startCmd.Flags().StringVar(&startCmdArgs.MountType, "mount-type", defaultMountTypeQEMU, "volume driver for the mount ("+mounts+")")
+	startCmd.Flags().BoolVar(&startCmdArgs.MountINotify, "mount-inotify", false, "propagate inotify file events to the VM")
 
 	// ssh agent
 	startCmd.Flags().BoolVarP(&startCmdArgs.ForwardAgent, "ssh-agent", "s", false, "forward SSH agent to the VM")
+
+	// ssh config generation
+	startCmd.Flags().BoolVar(&startCmdArgs.SSHConfig, "ssh-config", true, "generate SSH config in ~/.ssh/config")
 
 	// k8s
 	startCmd.Flags().BoolVarP(&startCmdArgs.Kubernetes.Enabled, "kubernetes", "k", false, "start with Kubernetes")
 	startCmd.Flags().BoolVar(&startCmdArgs.Flags.LegacyKubernetes, "with-kubernetes", false, "start with Kubernetes")
 	startCmd.Flags().StringVar(&startCmdArgs.Kubernetes.Version, "kubernetes-version", defaultKubernetesVersion, "must match a k3s version https://github.com/k3s-io/k3s/releases")
-	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.Ingress, "kubernetes-ingress", false, "enable Traefik ingress controller")
-	startCmd.Flags().BoolVar(&startCmdArgs.Kubernetes.ServiceLB, "kubernetes-disable-servicelb", false, "disable Klipper Service Load Balancer")
+	startCmd.Flags().StringSliceVar(&startCmdArgs.Kubernetes.Disable, "kubernetes-disable", defaultKubernetesDisable, "components to disable for k3s e.g. traefik,servicelb")
 	startCmd.Flags().StringToStringVar(&startCmdArgs.Kubernetes.NodeLabels, "kubernetes-node-labels", nil, "set node labels for Kubernetes")
 	startCmd.Flags().StringVar(&startCmdArgs.Kubernetes.ClusterDomain, "kubernetes-cluster-domain", defaultClusterDomain, "set to cluster.local by default")
+
 	startCmd.Flag("with-kubernetes").Hidden = true
 
 	// additional services in Kubernetes
@@ -163,7 +196,25 @@ func init() {
 	startCmd.Flags().StringToStringVar(&startCmdArgs.Env, "env", nil, "environment variables for the VM")
 
 	// dns
-	startCmd.Flags().IPSliceVarP(&startCmdArgs.Network.DNS, "dns", "n", nil, "DNS servers for the VM")
+	startCmd.Flags().IPSliceVarP(&startCmdArgs.Network.DNSResolvers, "dns", "n", nil, "DNS resolvers for the VM")
+	startCmd.Flags().StringSliceVar(&startCmdArgs.Flags.DNSHosts, "dns-host", nil, "custom DNS names to provide to resolver")
+}
+
+func dnsHostsFromFlag(hosts []string) map[string]string {
+	mapping := make(map[string]string)
+
+	for _, h := range hosts {
+		str := strings.SplitN(h, "=", 2)
+		if len(str) != 2 {
+			log.Warnf("unable to parse custom dns host: %v, skipping\n", h)
+			continue
+		}
+		src := str[0]
+		target := str[1]
+
+		mapping[src] = target
+	}
+	return mapping
 }
 
 // mountsFromFlag converts mounts from cli flag format to config file format
@@ -189,6 +240,60 @@ func mountsFromFlag(mounts []string) []config.Mount {
 	return mnts
 }
 
+func setDefaults(cmd *cobra.Command) {
+	if startCmdArgs.VMType == "" {
+		startCmdArgs.VMType = defaultVMType
+	}
+
+	if startCmdArgs.Network.Driver == "" {
+		startCmdArgs.Network.Driver = defaultNetworkDriver
+	}
+
+	if util.MacOS13OrNewer() {
+		// changing to vz implies changing mount type to virtiofs
+		if cmd.Flag("vm-type").Changed && startCmdArgs.VMType == "vz" && !cmd.Flag("mount-type").Changed {
+			startCmdArgs.MountType = "virtiofs"
+			cmd.Flag("mount-type").Changed = true
+		}
+	}
+
+	// mount type
+	{
+		// convert mount type for qemu
+		if startCmdArgs.VMType != "vz" && startCmdArgs.MountType == defaultMountTypeVZ {
+			startCmdArgs.MountType = defaultMountTypeQEMU
+			if cmd.Flag("mount-type").Changed {
+				log.Warnf("%s is only available for 'vz' vmType, using %s", defaultMountTypeVZ, defaultMountTypeQEMU)
+			}
+		}
+		// convert mount type for vz
+		if startCmdArgs.VMType == "vz" && startCmdArgs.MountType == "9p" {
+			startCmdArgs.MountType = "virtiofs"
+			if cmd.Flag("mount-type").Changed {
+				log.Warnf("9p is only available for 'qemu' vmType, using %s", defaultMountTypeVZ)
+			}
+		}
+	}
+}
+
+func setConfigDefaults(conf *config.Config) {
+	// handle macOS virtualization.framework transition
+	if conf.VMType == "" {
+		conf.VMType = defaultVMType
+	}
+
+	if conf.MountType == "" {
+		conf.MountType = defaultMountTypeQEMU
+		if util.MacOS13OrNewer() && conf.VMType == "vz" {
+			conf.MountType = defaultMountTypeVZ
+		}
+	}
+
+	if conf.Network.Driver == "" {
+		conf.Network.Driver = defaultNetworkDriver
+	}
+}
+
 func prepareConfig(cmd *cobra.Command) {
 	current, err := configmanager.Load()
 	if err != nil {
@@ -205,7 +310,11 @@ func prepareConfig(cmd *cobra.Command) {
 
 	// convert cli to config file format
 	startCmdArgs.Mounts = mountsFromFlag(startCmdArgs.Flags.Mounts)
+	startCmdArgs.Network.DNSHosts = dnsHostsFromFlag(startCmdArgs.Flags.DNSHosts)
 	startCmdArgs.ActivateRuntime = &startCmdArgs.Flags.ActivateRuntime
+
+	// set relevant missing default values
+	setDefaults(cmd)
 
 	// if there is no existing settings
 	if current.Empty() {
@@ -217,6 +326,9 @@ func prepareConfig(cmd *cobra.Command) {
 		}
 		current = template
 	}
+
+	// set missing defaults in the current config
+	setConfigDefaults(&current)
 
 	// docker can only be set in config file
 	startCmdArgs.Docker = current.Docker
@@ -233,6 +345,12 @@ func prepareConfig(cmd *cobra.Command) {
 	}
 	if !cmd.Flag("kubernetes").Changed {
 		startCmdArgs.Kubernetes.Enabled = current.Kubernetes.Enabled
+	}
+	if !cmd.Flag("kubernetes-version").Changed {
+		startCmdArgs.Kubernetes.Version = current.Kubernetes.Version
+	}
+	if !cmd.Flag("kubernetes-disable").Changed {
+		startCmdArgs.Kubernetes.Disable = current.Kubernetes.Disable
 	}
 	if !cmd.Flag("runtime").Changed {
 		startCmdArgs.Runtime = current.Runtime
@@ -252,11 +370,20 @@ func prepareConfig(cmd *cobra.Command) {
 	if !cmd.Flag("mount-type").Changed {
 		startCmdArgs.MountType = current.MountType
 	}
+	if !cmd.Flag("mount-inotify").Changed {
+		startCmdArgs.MountINotify = current.MountINotify
+	}
 	if !cmd.Flag("ssh-agent").Changed {
 		startCmdArgs.ForwardAgent = current.ForwardAgent
 	}
+	if !cmd.Flag("ssh-config").Changed {
+		startCmdArgs.SSHConfig = current.SSHConfig
+	}
 	if !cmd.Flag("dns").Changed {
-		startCmdArgs.Network.DNS = current.Network.DNS
+		startCmdArgs.Network.DNSResolvers = current.Network.DNSResolvers
+	}
+	if !cmd.Flag("dns-host").Changed {
+		startCmdArgs.Network.DNSHosts = current.Network.DNSHosts
 	}
 	if !cmd.Flag("env").Changed {
 		startCmdArgs.Env = current.Env
@@ -275,6 +402,16 @@ func prepareConfig(cmd *cobra.Command) {
 		}
 		if !cmd.Flag("network-address").Changed {
 			startCmdArgs.Network.Address = current.Network.Address
+		}
+		if util.MacOS13OrNewer() {
+			if !cmd.Flag("vm-type").Changed {
+				startCmdArgs.VMType = current.VMType
+			}
+		}
+		if util.MacOS13OrNewerOnM1() {
+			if !cmd.Flag("vz-rosetta").Changed {
+				startCmdArgs.VZRosetta = current.VZRosetta
+			}
 		}
 	}
 }

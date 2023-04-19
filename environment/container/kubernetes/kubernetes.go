@@ -18,9 +18,9 @@ import (
 
 const (
 	Name           = "kubernetes"
-	DefaultVersion = "v1.25.0+k3s1"
+	DefaultVersion = "v1.25.4+k3s1"
 
-	configKey = "kubernetes_config"
+	ConfigKey = "kubernetes_config"
 )
 
 func newRuntime(host environment.HostActions, guest environment.GuestActions) environment.Container {
@@ -51,6 +51,7 @@ func (c kubernetesRuntime) isInstalled() bool {
 	// it is installed if uninstall script is present.
 	return c.guest.RunQuiet("command", "-v", "k3s-uninstall.sh") == nil
 }
+
 func (c kubernetesRuntime) isVersionInstalled(version string) bool {
 	// validate version change via cli flag/config.
 	out, err := c.guest.RunOutput("k3s", "--version")
@@ -60,7 +61,7 @@ func (c kubernetesRuntime) isVersionInstalled(version string) bool {
 	return strings.Contains(out, version)
 }
 
-func (c kubernetesRuntime) Running(ctx context.Context) bool {
+func (c kubernetesRuntime) Running(context.Context) bool {
 	return c.guest.RunQuiet("sudo", "service", "k3s", "status") == nil
 }
 
@@ -70,7 +71,7 @@ func (c kubernetesRuntime) runtime() string {
 
 func (c kubernetesRuntime) config() config.Kubernetes {
 	conf := config.Kubernetes{Version: DefaultVersion}
-	if b := c.guest.Get(configKey); b != "" {
+	if b := c.guest.Get(ConfigKey); b != "" {
 		_ = json.Unmarshal([]byte(b), &conf)
 	}
 	return conf
@@ -82,7 +83,7 @@ func (c kubernetesRuntime) setConfig(conf config.Kubernetes) error {
 		return fmt.Errorf("error encoding kubernetes config to json: %w", err)
 	}
 
-	return c.guest.Set(configKey, string(b))
+	return c.guest.Set(ConfigKey, string(b))
 }
 
 func (c *kubernetesRuntime) Provision(ctx context.Context) error {
@@ -125,13 +126,9 @@ func (c *kubernetesRuntime) Provision(ctx context.Context) error {
 	}
 
 	// this needs to happen on each startup
-	switch runtime {
-	case containerd.Name:
-		installContainerdDeps(c.guest, a)
-	case docker.Name:
-		a.Retry("waiting for docker cri", time.Second*2, 5, func(int) error {
-			return c.guest.Run("sudo", "service", "cri-dockerd", "start")
-		})
+	{
+		// cni is used by both cri-dockerd and containerd
+		installCniConfig(c.guest, a)
 	}
 
 	// provision successful, now we can persist the version
@@ -208,7 +205,6 @@ func (c kubernetesRuntime) deleteAllContainers() error {
 }
 
 func (c kubernetesRuntime) stopAllContainers() error {
-
 	ids := c.runningContainerIDs()
 	if ids == "" {
 		return nil
@@ -273,7 +269,7 @@ func (c kubernetesRuntime) Dependencies() []string {
 	return []string{"kubectl"}
 }
 
-func (c kubernetesRuntime) Version(ctx context.Context) string {
+func (c kubernetesRuntime) Version(context.Context) string {
 	version, _ := c.host.RunOutput("kubectl", "--context", config.CurrentProfile().ID, "version", "--short")
 	return version
 }

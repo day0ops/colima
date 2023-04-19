@@ -10,7 +10,7 @@ import (
 	"github.com/abiosoft/colima/environment"
 )
 
-func installContainerdDeps(guest environment.GuestActions, a *cli.ActiveCommandChain) {
+func installCniConfig(guest environment.GuestActions, a *cli.ActiveCommandChain) {
 	// fix cni config
 	a.Add(func() error {
 		flannelFile := "/etc/cni/net.d/10-flannel.conflist"
@@ -19,7 +19,7 @@ func installContainerdDeps(guest environment.GuestActions, a *cli.ActiveCommandC
 			return fmt.Errorf("error creating cni config dir: %w", err)
 		}
 
-		flannel, err := embedded.ReadString("k3s/flannel.json")
+		flannel, err := embedded.Read("k3s/flannel.json")
 		if err != nil {
 			return fmt.Errorf("error reading embedded flannel config: %w", err)
 		}

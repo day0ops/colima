@@ -38,6 +38,7 @@ func InstanceConfig() (config.Config, error) {
 // IPAddress returns the ip address for profile.
 // It returns the PTP address if networking is enabled or falls back to 127.0.0.1.
 // It is guaranteed to return a value.
+//
 // TODO: unnecessary round-trip is done to get instance details from Lima.
 func IPAddress(profileID string) string {
 	// profile = toUserFriendlyName(profile)
@@ -72,8 +73,10 @@ type InstanceInfo struct {
 	Runtime   string `json:"runtime,omitempty"`
 }
 
+// Running checks if the instance is running.
 func (i InstanceInfo) Running() bool { return i.Status == limaStatusRunning }
 
+// Config returns the current Colima config
 func (i InstanceInfo) Config() (config.Config, error) {
 	return configmanager.LoadFrom(ColimaStateFile(i.Name))
 }
@@ -122,13 +125,16 @@ func ShowSSH(profileID string, layer bool, format string) (resp struct {
 	return resp, nil
 }
 
-func replaceSSHCmd(cmd string, name string, ip string, port int) string {
+func replaceSSHCmd(cmd string, profileID string, ip string, port int) string {
+	profileID = config.Profile(profileID).ID
+	name := config.Profile(profileID).ShortName
 	var out []string
 
 	for _, s := range util.ShellSplit(cmd) {
 		if port > 0 {
 			if strings.HasPrefix(s, "ControlPath=") {
-				s = "ControlPath=" + strconv.Quote(filepath.Join(config.Dir(), "ssh.sock"))
+				configDir := filepath.Join(filepath.Dir(config.Dir()), name)
+				s = "ControlPath=" + strconv.Quote(filepath.Join(configDir, "ssh.sock"))
 			}
 			if strings.HasPrefix(s, "Port=") {
 				s = "Port=" + strconv.Itoa(port)
@@ -141,13 +147,16 @@ func replaceSSHCmd(cmd string, name string, ip string, port int) string {
 		out = append(out, s)
 	}
 
-	if out[len(out)-1] == "lima-"+name {
+	if out[len(out)-1] == "lima-"+profileID {
 		out[len(out)-1] = ip
 	}
 
 	return strings.Join(out, " ")
 }
-func replaceSSHConfig(conf string, name string, ip string, port int) string {
+func replaceSSHConfig(conf string, profileID string, ip string, port int) string {
+	profileID = config.Profile(profileID).ID
+	name := config.Profile(profileID).ShortName
+
 	var out bytes.Buffer
 	scanner := bufio.NewScanner(strings.NewReader(conf))
 
@@ -162,12 +171,13 @@ func replaceSSHConfig(conf string, name string, ip string, port int) string {
 		line := scanner.Text()
 
 		if strings.HasPrefix(line, "Host ") {
-			line = "Host " + name
+			line = "Host " + profileID
 		}
 
 		if port > 0 {
 			if pad, ok := hasPrefix(line, "ControlPath "); ok {
-				line = pad + "ControlPath " + strconv.Quote(filepath.Join(config.Dir(), "ssh.sock"))
+				configDir := filepath.Join(filepath.Dir(config.Dir()), name)
+				line = pad + "ControlPath " + strconv.Quote(filepath.Join(configDir, "ssh.sock"))
 			}
 
 			if pad, ok := hasPrefix(line, "Hostname "); ok {
@@ -199,17 +209,27 @@ func getInstance(profileID string) (InstanceInfo, error) {
 	if err := cmd.Run(); err != nil {
 		return i, fmt.Errorf("error retrieving instance: %w", err)
 	}
+
+	if buf.Len() == 0 {
+		return i, fmt.Errorf("instance '%s' does not exist", config.Profile(profileID).DisplayName)
+	}
+
 	if err := json.Unmarshal(buf.Bytes(), &i); err != nil {
 		return i, fmt.Errorf("error retrieving instance: %w", err)
 	}
-
 	return i, nil
 }
 
 // Instances returns Lima instances created by colima.
-func Instances() ([]InstanceInfo, error) {
+func Instances(ids ...string) ([]InstanceInfo, error) {
+	limaIDs := make([]string, len(ids))
+	for i := range ids {
+		limaIDs = append(limaIDs, config.Profile(ids[i]).ID)
+	}
+	args := append([]string{"list", "--json"}, limaIDs...)
+
 	var buf bytes.Buffer
-	cmd := cli.Command("limactl", "list", "--json")
+	cmd := cli.Command("limactl", args...)
 	cmd.Stderr = nil
 	cmd.Stdout = &buf
 
@@ -341,5 +361,12 @@ const colimaStateFileName = "colima.yaml"
 
 // ColimaStateFile returns path to the colima state yaml file.
 func ColimaStateFile(profileID string) string {
-	return filepath.Join(LimaHome(), profileID, colimaStateFileName)
+	return filepath.Join(LimaHome(), config.Profile(profileID).ID, colimaStateFileName)
+}
+
+const colimaDiffDisk = "diffdisk"
+
+// ColimaDiffDisk returns path to the diffdisk for the colima VM.
+func ColimaDiffDisk(profileID string) string {
+	return filepath.Join(LimaHome(), config.Profile(profileID).ID, colimaDiffDisk)
 }

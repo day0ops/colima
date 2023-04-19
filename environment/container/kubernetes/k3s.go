@@ -122,12 +122,8 @@ func installK3sCluster(
 		"--resolv-conf", "/etc/resolv.conf",
 	}
 
-	if !conf.Ingress {
-		args = append(args, "--disable", "traefik")
-	}
-
-	if conf.ServiceLB {
-		args = append(args, "--disable", "servicelb")
+	for _, d := range conf.Disable {
+		args = append(args, "--disable", d)
 	}
 
 	// replace ip address if networking is enabled
@@ -150,7 +146,7 @@ func installK3sCluster(
 
 	switch containerRuntime {
 	case docker.Name:
-		args = append(args, "--container-runtime-endpoint", "unix:///run/cri-dockerd.sock")
+		args = append(args, "--docker")
 	case containerd.Name:
 		args = append(args, "--container-runtime-endpoint", "unix:///run/containerd/containerd.sock")
 	}

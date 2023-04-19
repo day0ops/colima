@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/abiosoft/colima/environment/vm/lima"
 	"github.com/abiosoft/colima/environment/vm/lima/limautil"
 	"github.com/abiosoft/colima/util"
+	"github.com/docker/go-units"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,7 +31,7 @@ type App interface {
 	Stop(force bool) error
 	Delete() error
 	SSH(layer bool, args ...string) error
-	Status() error
+	Status(extended bool) error
 	Version() error
 	Runtime() (string, error)
 	Kubernetes() (environment.Container, error)
@@ -116,9 +118,14 @@ func (c colimaApp) Start(conf config.Config) error {
 		log.Error(fmt.Errorf("error persisting runtime settings: %w", err))
 	}
 
+	// persist the kubernetes config
+	if err := c.setKubernetes(conf.Kubernetes); err != nil {
+		log.Error(fmt.Errorf("error persisting kubernetes settings: %w", err))
+	}
+
 	log.Println("done")
 
-	if err := generateSSHConfig(); err != nil {
+	if err := generateSSHConfig(conf.SSHConfig); err != nil {
 		log.Trace("error generating ssh_config: %w", err)
 	}
 	return nil
@@ -162,7 +169,7 @@ func (c colimaApp) Stop(force bool) error {
 
 	log.Println("done")
 
-	if err := generateSSHConfig(); err != nil {
+	if err := generateSSHConfig(false); err != nil {
 		log.Trace("error generating ssh_config: %w", err)
 	}
 	return nil
@@ -209,7 +216,7 @@ func (c colimaApp) Delete() error {
 
 	log.Println("done")
 
-	if err := generateSSHConfig(); err != nil {
+	if err := generateSSHConfig(false); err != nil {
 		log.Trace("error generating ssh_config: %w", err)
 	}
 	return nil
@@ -288,14 +295,14 @@ func (c colimaApp) SSH(layer bool, args ...string) error {
 	if len(args) > 0 {
 		args = append([]string{"-q", "-t", resp.IPAddress, "--"}, args...)
 	} else if workDir != "" {
-		args = []string{"-q", "-t", resp.IPAddress, "--", "cd " + workDir + " 2> /dev/null; bash --login"}
+		args = []string{"-q", "-t", resp.IPAddress, "--", "cd " + workDir + " 2> /dev/null; \"$SHELL\" --login"}
 	}
 
 	args = append(util.ShellSplit(cmdArgs), args...)
 	return cli.CommandInteractive("ssh", args...).Run()
 }
 
-func (c colimaApp) Status() error {
+func (c colimaApp) Status(extended bool) error {
 	ctx := context.Background()
 	if !c.guest.Running(ctx) {
 		return fmt.Errorf("%s is not running", config.CurrentProfile().DisplayName)
@@ -306,12 +313,25 @@ func (c colimaApp) Status() error {
 		return err
 	}
 
-	log.Println(config.CurrentProfile().DisplayName, "is running")
+	driver := "QEMU"
+	conf, _ := limautil.InstanceConfig()
+	if !conf.Empty() {
+		driver = conf.DriverLabel()
+	}
+
+	log.Println(config.CurrentProfile().DisplayName, "is running using", driver)
 	log.Println("arch:", c.guest.Arch())
 	log.Println("runtime:", currentRuntime)
-	if conf, err := limautil.InstanceConfig(); err == nil {
+	if conf.MountType != "" {
 		log.Println("mountType:", conf.MountType)
 	}
+
+	// ip address
+	if ipAddress := limautil.IPAddress(config.CurrentProfile().ID); ipAddress != "127.0.0.1" {
+		log.Println("address:", ipAddress)
+	}
+
+	// docker socket
 	if currentRuntime == docker.Name {
 		log.Println("socket:", "unix://"+docker.HostSocketFile())
 	}
@@ -319,6 +339,17 @@ func (c colimaApp) Status() error {
 	// kubernetes
 	if k, err := c.Kubernetes(); err == nil && k.Running(ctx) {
 		log.Println("kubernetes: enabled")
+	}
+
+	// additional details
+	if extended {
+		log.Println("networkDriver:", conf.Network.Driver)
+
+		if inst, err := limautil.Instance(); err == nil {
+			log.Println("cpu:", inst.CPU)
+			log.Println("mem:", units.BytesSize(float64(inst.Memory)))
+			log.Println("disk:", units.BytesSize(float64(inst.Disk)))
+		}
 	}
 
 	return nil
@@ -377,6 +408,15 @@ func (c colimaApp) setRuntime(runtime string) error {
 	return c.guest.Set(environment.ContainerRuntimeKey, runtime)
 }
 
+func (c colimaApp) setKubernetes(conf config.Kubernetes) error {
+	b, err := json.Marshal(conf)
+	if err != nil {
+		return err
+	}
+
+	return c.guest.Set(kubernetes.ConfigKey, string(b))
+}
+
 func (c colimaApp) currentContainerEnvironments(ctx context.Context) ([]environment.Container, error) {
 	var containers []environment.Container
 
@@ -430,7 +470,7 @@ func (c colimaApp) Active() bool {
 	return c.guest.Running(context.Background())
 }
 
-func generateSSHConfig() error {
+func generateSSHConfig(modifySSHConfig bool) error {
 	instances, err := limautil.Instances()
 	if err != nil {
 		return fmt.Errorf("error retrieving instances: %w", err)
@@ -461,6 +501,11 @@ func generateSSHConfig() error {
 	sshFileColima := filepath.Join(filepath.Dir(config.Dir()), "ssh_config")
 	if err := os.WriteFile(sshFileColima, buf.Bytes(), 0644); err != nil {
 		return fmt.Errorf("error writing ssh_config file: %w", err)
+	}
+
+	if !modifySSHConfig {
+		// ~/.ssh/config modification disabled
+		return nil
 	}
 
 	includeLine := "Include " + sshFileColima

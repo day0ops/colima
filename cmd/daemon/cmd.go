@@ -4,12 +4,14 @@ import (
 	"context"
 	"time"
 
-	"github.com/abiosoft/colima/daemon/process"
-	"github.com/abiosoft/colima/daemon/process/gvproxy"
-	"github.com/abiosoft/colima/daemon/process/vmnet"
-
 	"github.com/abiosoft/colima/cmd/root"
 	"github.com/abiosoft/colima/config"
+	"github.com/abiosoft/colima/daemon/process"
+	"github.com/abiosoft/colima/daemon/process/gvproxy"
+	"github.com/abiosoft/colima/daemon/process/inotify"
+	"github.com/abiosoft/colima/daemon/process/vmnet"
+	"github.com/abiosoft/colima/environment/host"
+	"github.com/abiosoft/colima/environment/vm/lima"
 	"github.com/spf13/cobra"
 )
 
@@ -33,8 +35,18 @@ var startCmd = &cobra.Command{
 		if daemonArgs.vmnet {
 			processes = append(processes, vmnet.New())
 		}
-		if daemonArgs.gvproxy {
-			processes = append(processes, gvproxy.New())
+		if daemonArgs.gvproxy.enabled {
+			processes = append(processes, gvproxy.New(daemonArgs.gvproxy.dnsHosts))
+		}
+		if daemonArgs.inotify.enabled {
+			processes = append(processes, inotify.New())
+			guest := lima.New(host.New())
+			args := inotify.Args{
+				GuestActions: guest,
+				Runtime:      daemonArgs.inotify.runtime,
+				Dirs:         daemonArgs.inotify.dirs,
+			}
+			ctx = context.WithValue(ctx, inotify.CtxKeyArgs(), args)
 		}
 
 		return start(ctx, processes)
@@ -71,9 +83,16 @@ var statusCmd = &cobra.Command{
 }
 
 var daemonArgs struct {
-	vmnet    bool
-	gvproxy  bool
-	fsnotify bool
+	vmnet   bool
+	gvproxy struct {
+		enabled  bool
+		dnsHosts map[string]string
+	}
+	inotify struct {
+		enabled bool
+		dirs    []string
+		runtime string
+	}
 
 	verbose bool
 }
@@ -86,6 +105,9 @@ func init() {
 	daemonCmd.AddCommand(statusCmd)
 
 	startCmd.Flags().BoolVar(&daemonArgs.vmnet, "vmnet", false, "start vmnet")
-	startCmd.Flags().BoolVar(&daemonArgs.gvproxy, "gvproxy", false, "start gvproxy")
-	startCmd.Flags().BoolVar(&daemonArgs.fsnotify, "fsnotify", false, "start fsnotify")
+	startCmd.Flags().BoolVar(&daemonArgs.gvproxy.enabled, "gvproxy", false, "start gvproxy")
+	startCmd.Flags().StringToStringVar(&daemonArgs.gvproxy.dnsHosts, "gvproxy-hosts", nil, "DNS hosts for gvproxy")
+	startCmd.Flags().BoolVar(&daemonArgs.inotify.enabled, "inotify", false, "start inotify")
+	startCmd.Flags().StringSliceVar(&daemonArgs.inotify.dirs, "inotify-dir", nil, "set inotify directories")
+	startCmd.Flags().StringVar(&daemonArgs.inotify.runtime, "inotify-runtime", "docker", "set runtime")
 }

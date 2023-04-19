@@ -27,7 +27,16 @@
     - [Accessing the underlying Virtual Machine](#accessing-the-underlying-virtual-machine)
   - [The Virtual Machine's IP is not reachable](#the-virtual-machines-ip-is-not-reachable)
     - [Enable reachable IP address](#enable-reachable-ip-address)
+  - [How can disk space be recovered?](#how-can-disk-space-be-recovered)
+    - [Automatic](#automatic)
+    - [Manual](#manual)
   - [Are Lima overrides supported?](#are-lima-overrides-supported)
+  - [Troubleshooting](#troubleshooting)
+    - [Colima not starting](#colima-not-starting)
+      - [Broken status](#broken-status)
+      - [FATA\[0000\] error starting vm: error at 'starting': exit status 1](#fata0000-error-starting-vm-error-at-starting-exit-status-1)
+    - [Issues after an upgrade](#issues-after-an-upgrade)
+    - [Colima cannot access the internet.](#colima-cannot-access-the-internet)
 
 ## How does Colima compare to Lima?
 
@@ -107,7 +116,7 @@ docker context use <context-name>
 ```
 ### Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
 
-Colima uses Docker contexts to allow co-existence with other Docker servers and sets itself as the default Docker context on startup. 
+Colima uses Docker contexts to allow co-existence with other Docker servers and sets itself as the default Docker context on startup.
 
 However, some applications are not aware of Docker contexts and may lead to the error.
 
@@ -120,7 +129,7 @@ This can be fixed by any of the following approaches. Ensure the Docker socket p
    ```sh
    export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
    ```
-3. Linking the Colima socket to the default socket path. **Note** that this may break other Docker servers. 
+3. Linking the Colima socket to the default socket path. **Note** that this may break other Docker servers.
 
    ```sh
    sudo ln -sf $HOME/.colima/default/docker.sock /var/run/docker.sock
@@ -133,24 +142,24 @@ This can be fixed by any of the following approaches. Ensure the Docker socket p
 
   On first startup, Colima generates Docker daemon.json file at `$HOME/.colima/docker/daemon.json`.
   Modify the daemon.json file accordingly and restart Colima.
-   
+
 * v0.4.0 or newer
 
   Start Colima with `--edit` flag.
-  
+
   ```sh
   colima start --edit
   ```
-  
+
   Add the Docker config to the `docker` section.
-  
+
   ```diff
   - docker: {}
   + docker:
   +   insecure-registries:
   +     - myregistry.com:5000
   +     - host.docker.internal:5000
-  ```  
+  ```
 
 ### Docker plugins are missing (buildx, scan)
 
@@ -179,11 +188,13 @@ Install Docker Scan
 
 ```sh
 ARCH=amd64 # change to 'arm64' for m1
-VERSION=v0.17.0
+VERSION=v0.21.0
 curl -LO https://github.com/docker/scan-cli-plugin/releases/download/${VERSION}/docker-scan_darwin_${ARCH}
 mkdir -p ~/.docker/cli-plugins
 mv docker-scan_darwin_${ARCH} ~/.docker/cli-plugins/docker-scan
 chmod +x ~/.docker/cli-plugins/docker-scan
+mkdir -p ~/.docker/scan
+echo "{}" > ~/.docker/scan/config.json # config file required by the docker scan plugin
 docker scan --version # verify installation
 ```
 
@@ -234,7 +245,7 @@ The underlying Virtual Machine is still accessible by specifying `--layer=false`
 
 ## The Virtual Machine's IP is not reachable
 
-This is by design. Reachable IP address is not enabled by default because it requires root access.
+Reachable IP address is not enabled by default due to slower startup time.
 
 ### Enable reachable IP address
 
@@ -251,8 +262,98 @@ This is by design. Reachable IP address is not enabled by default because it req
   +  address: true
   ```
 
+## How can disk space be recovered?
+
+Disk space can be freed in the VM by removing containers or running `docker system prune`.
+However, it will not reflect on the host on Colima versions v0.4.x or lower.
+
+### Automatic
+
+For Colima v0.5.0 and above, unused disk space in the VM is released on startup. A restart would suffice.
+
+### Manual
+
+For Colima v0.5.0 and above, user can manually recover the disk space by running `sudo fstrim -a` in the VM.
+
+```sh
+# '-v' may be added for verbose output
+colima ssh -- sudo fstrim -a
+```
+
 ## Are Lima overrides supported?
 
 Yes, however this should only be done by advanced users.
 
 Overriding the image is not supported as Colima's image includes bundled dependencies that would be missing in the user specified image.
+
+## Troubleshooting
+
+These are some common issues reported by users and how to troubleshoot them.
+
+### Colima not starting
+
+There are multiple reasons that could cause Colima to fail to start.
+
+#### Broken status
+
+This is the case when the output of `colima list` shows a broken status. This can happen due to macOS restart.
+
+```
+colima list
+PROFILE    STATUS     ARCH       CPUS    MEMORY    DISK     RUNTIME    ADDRESS
+default    Broken     aarch64    2       2GiB      60GiB
+```
+This can be fixed by forcefully stopping Colima. The state will be changed to `Stopped` and it should start up normally afterwards.
+
+```
+colima stop --force
+```
+
+#### FATA[0000] error starting vm: error at 'starting': exit status 1
+
+This indicates that a fatal error is preventing Colima from starting, you can enable the debug log with `--verbose` flag to get more info.
+
+If the log output includes `exiting, status={Running:false Degraded:false Exiting:true Errors:[] SSHLocalPort:0}` then it is most certainly due to one of the following.
+
+1. Running on a device without virtualization support.
+2. Running an x86_64 version of homebrew (and Colima) on an M1 device.
+
+### Issues after an upgrade
+
+The recommended way to troubleshoot after an upgrade is to test with a separate profile.
+
+```sh
+# start with a profile named 'debug'
+colima start debug
+```
+If the separate profile starts successfully without issues, then the issue would be resolved by resetting the default profile.
+
+```
+colima delete
+colima start
+```
+
+### Colima cannot access the internet.
+
+Failure for Colima to access the internet is usually down to DNS.
+
+Try custom DNS server(s)
+
+```sh
+colima start --dns 8.8.8.8 --dns 1.1.1.1
+```
+
+Ping an internet address from within the VM to ascertain
+
+```
+colima ssh -- ping -c4 google.com
+PING google.com (216.58.223.238): 56 data bytes
+64 bytes from 216.58.223.238: seq=0 ttl=42 time=0.082 ms
+64 bytes from 216.58.223.238: seq=1 ttl=42 time=0.557 ms
+64 bytes from 216.58.223.238: seq=2 ttl=42 time=0.465 ms
+64 bytes from 216.58.223.238: seq=3 ttl=42 time=0.457 ms
+
+--- google.com ping statistics ---
+4 packets transmitted, 4 packets received, 0% packet loss
+round-trip min/avg/max = 0.082/0.390/0.557 ms
+```

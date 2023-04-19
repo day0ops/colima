@@ -2,12 +2,15 @@
 
 with pkgs;
 
-buildGo118Module {
+buildGo119Module {
   name = "colima";
   pname = "colima";
   src = ./.;
   nativeBuildInputs = [ installShellFiles makeWrapper git ];
-  vendorSha256 = "sha256-jDzDwK7qA9lKP8CfkKzfooPDrHuHI4OpiLXmX9vOpOg=";
+  vendorSha256 = "sha256-bEgC7j8WvCgrJ2Ahye4mfWVEmo6Y/OO64mDIJXvtaiE=";
+  CGO_ENABLED = 1;
+
+  subPackages = [ "cmd/colima" ];
 
   # `nix-build` has .git folder but `nix build` does not, this caters for both cases
   preConfigure = ''

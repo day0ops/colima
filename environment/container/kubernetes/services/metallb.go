@@ -13,7 +13,7 @@ import (
 	"github.com/abiosoft/colima/util/downloader"
 )
 
-const metallbVersion = "v0.13.7"
+const metallbVersion = "v0.13.9"
 
 func InstallMetallb(
 	host environment.HostActions,
@@ -49,7 +49,7 @@ func InstallMetallb(
 		if err := tmpl.Execute(&buf, availableData); err != nil {
 			return fmt.Errorf("error parsing embedded metallb config: %w", err)
 		}
-		return guest.Write(metallbConfigPath, buf.String())
+		return guest.Write(metallbConfigPath, buf.Bytes())
 	})
 
 	a.Retry("", time.Second*5, 30, func(retryCount int) error {

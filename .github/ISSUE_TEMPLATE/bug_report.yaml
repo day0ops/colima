@@ -8,7 +8,7 @@ body:
   - type: textarea
     attributes:
       label: Version
-      description: What is the output of `colima version`, `limactl --version` and `qemu-img --version`
+      description: What is the output of `colima version`, `limactl --version` and `qemu-img --version`.
       value: |
         Colima Version:
         Lima Version:
@@ -18,16 +18,25 @@ body:
       label: Operating System
       description: Which Operating System does this issue happen on? Check all that apply.
       options:
-        - label: macOS Intel
+        - label: macOS Intel <= 12 (Monterrey)
           required: false
-        - label: macOS M1
+        - label: macOS Intel >= 13 (Ventura)
+          required: false
+        - label: macOS M1 <= 12 (Monterrey)
+          required: false
+        - label: macOS M1 >= 13 (Ventura)
           required: false
         - label: Linux
           required: false
   - type: textarea
     attributes:
+      label: Output of `colima status`
+      description: The output of `colima status` or `colima status -p <profilename>` tells us what vm-type and mount type, etc.
+      value: 
+  - type: textarea
+    attributes:
       label: Reproduction Steps
-      description: Kindly walk us through the steps to reproduce this behaviour
+      description: Kindly walk us through the steps to reproduce this behaviour.
       value: |
         1.
         2.
